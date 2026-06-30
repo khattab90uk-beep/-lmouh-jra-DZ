@@ -14,6 +14,13 @@ from telegram.ext import (
     ContextTypes,
 )
 from content import STRUCTURE, DAILY_QUESTIONS
+from reminders import (
+    get_wife_dua,
+    get_wird_reminder,
+    get_adhkar_sabah_reminder,
+    get_adhkar_masa_reminder,
+    get_hijri_date,
+)
 
 logging.basicConfig(
     format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
@@ -21,7 +28,7 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-# ─── مسار ملف المشتركين ──────────────────────────────────────────────────────
+# ─── مسارات الملفات ──────────────────────────────────────────────────────────
 SUBSCRIBERS_FILE = Path(__file__).parent / "subscribers.json"
 QUESTION_INDEX_FILE = Path(__file__).parent / "question_index.json"
 
@@ -68,7 +75,7 @@ def main_menu_keyboard() -> InlineKeyboardMarkup:
         rows.append([InlineKeyboardButton(cat_data["title"], callback_data=f"CAT:{cat_key}")])
     rows.append([InlineKeyboardButton("📅 سؤال اليوم", callback_data="DAILY_Q")])
     rows.append([
-        InlineKeyboardButton("🔔 اشترك في السؤال اليومي", callback_data="SUBSCRIBE"),
+        InlineKeyboardButton("🔔 اشترك في التذكيرات", callback_data="SUBSCRIBE"),
         InlineKeyboardButton("🔕 إلغاء الاشتراك", callback_data="UNSUBSCRIBE"),
     ])
     return InlineKeyboardMarkup(rows)
@@ -114,10 +121,12 @@ def back_to_topic_keyboard(cat_key: str, topic_key: str) -> InlineKeyboardMarkup
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.effective_user
     name = user.first_name if user else "أخي / أختي"
+    hijri = get_hijri_date()
     welcome = (
         f"السلام عليكم ورحمة الله وبركاته 🌿\n\n"
+        f"📅 *{hijri}*\n\n"
         f"مرحباً يا *{name}* في بوت *العلم الشرعي للموحدين* 📚\n\n"
-        "هذا البوت جُمع فيه ما يحتاجه الأخ الموحد والأخت الموحدة من:\n"
+        "هذا البوت جُمع فيه ما يحتاجه الأخ والأخت الموحدة من:\n"
         "• 📗 العقيدة الصحيحة والتوحيد الخالص\n"
         "• 📘 الفقه والعبادات بالتفصيل\n"
         "• 🌸 علوم المرأة المسلمة كاملة\n"
@@ -126,7 +135,8 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "• 📿 الأذكار والأدعية المأثورة\n"
         "• 📖 القرآن وعلومه\n"
         "• 📜 الحديث النبوي والسيرة\n"
-        "• 📅 سؤال ديني يومي للمشتركين\n\n"
+        "• 🌟 قصص الصحابة والصحابيات\n"
+        "• 📅 سؤال ديني يومي + تذكيرات يومية\n\n"
         "اختر من القائمة 👇"
     )
     await update.message.reply_text(
@@ -142,10 +152,19 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "/start — القائمة الرئيسية\n"
         "/help — المساعدة\n"
         "/search <كلمة> — البحث في المحتوى\n"
-        "/subscribe — الاشتراك في السؤال اليومي\n"
+        "/subscribe — الاشتراك في التذكيرات اليومية\n"
         "/unsubscribe — إلغاء الاشتراك\n"
         "/daily — سؤال اليوم الآن\n"
+        "/wird — ورد القرآن اليومي\n"
+        "/dua — دعاء المرأة الصابرة\n"
         "/stats — إحصائيات البوت\n\n"
+        "📅 *التذكيرات اليومية للمشتركين:*\n"
+        "🌅 06:00 — الورد القرآني اليومي\n"
+        "🤲 06:30 — تذكير أذكار الصباح\n"
+        "❓ 10:00 — سؤال شرعي يومي\n"
+        "🌆 17:30 — تذكير أذكار المساء\n"
+        "🌙 21:00 — دعاء المرأة الصابرة\n"
+        "_(التوقيت بتوقيت الجزائر)_\n\n"
         "💡 يمكنك أيضاً كتابة أي كلمة مباشرةً للبحث التلقائي."
     )
     await update.message.reply_text(text, parse_mode="Markdown")
@@ -155,13 +174,19 @@ async def subscribe_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
     subs = load_subscribers()
     if user_id in subs:
-        await update.message.reply_text("✅ أنت مشترك بالفعل في السؤال اليومي!")
+        await update.message.reply_text("✅ أنت مشترك بالفعل في التذكيرات اليومية!")
         return
     subs.add(user_id)
     save_subscribers(subs)
     await update.message.reply_text(
         "🔔 *تم الاشتراك بنجاح!*\n\n"
-        "ستصلك مسألة شرعية يومياً إن شاء الله 🌿\n"
+        "ستصلك يومياً إن شاء الله:\n"
+        "🌅 الورد القرآني — 6:00 صباحاً\n"
+        "🤲 أذكار الصباح — 6:30 صباحاً\n"
+        "❓ سؤال شرعي — 10:00 صباحاً\n"
+        "🌆 أذكار المساء — 5:30 مساءً\n"
+        "🌙 دعاء المرأة الصابرة — 9:00 مساءً\n"
+        "_(بتوقيت الجزائر)_\n\n"
         "لإلغاء الاشتراك: /unsubscribe",
         parse_mode="Markdown"
     )
@@ -186,8 +211,19 @@ async def daily_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         f"❓ *{q['q']}*\n\n"
         f"{q['a']}\n\n"
         "─────────────────\n"
-        "اشترك في السؤال اليومي: /subscribe"
+        "اشترك في التذكيرات اليومية: /subscribe"
     )
+    await update.message.reply_text(text, parse_mode="Markdown")
+
+
+async def wird_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    day_of_year = datetime.date.today().timetuple().tm_yday
+    text = get_wird_reminder(day_of_year)
+    await update.message.reply_text(text, parse_mode="Markdown")
+
+
+async def dua_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    text = get_wife_dua()
     await update.message.reply_text(text, parse_mode="Markdown")
 
 
@@ -200,10 +236,11 @@ async def stats_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     )
     text = (
         "📊 *إحصائيات البوت*\n\n"
-        f"👥 المشتركون في السؤال اليومي: *{len(subs)}*\n"
+        f"👥 المشتركون في التذكيرات: *{len(subs)}*\n"
         f"📚 عدد الأقسام الرئيسية: *{len(STRUCTURE)}*\n"
         f"📋 عدد المواضيع الفرعية: *{total_content}*\n"
         f"❓ عدد أسئلة اليوم المتوفرة: *{len(DAILY_QUESTIONS)}*\n"
+        f"📅 {get_hijri_date()}\n"
     )
     await update.message.reply_text(text, parse_mode="Markdown")
 
@@ -242,15 +279,13 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await query.answer()
     data = query.data
 
-    # ── الرئيسية
     if data == "MAIN":
         await query.edit_message_text(
-            "🏠 *القائمة الرئيسية*\n\nاختر القسم:",
+            f"🏠 *القائمة الرئيسية*\n📅 {get_hijri_date()}\n\nاختر القسم:",
             parse_mode="Markdown",
             reply_markup=main_menu_keyboard()
         )
 
-    # ── سؤال اليوم
     elif data == "DAILY_Q":
         idx = load_question_index()
         q = DAILY_QUESTIONS[idx % len(DAILY_QUESTIONS)]
@@ -259,7 +294,7 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             f"❓ *{q['q']}*\n\n"
             f"{q['a']}\n\n"
             "─────────────────\n"
-            "اشترك في السؤال اليومي عبر الزر أدناه 👇"
+            "اشترك في التذكيرات اليومية عبر الزر أدناه 👇"
         )
         await query.edit_message_text(
             text,
@@ -270,7 +305,6 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             ])
         )
 
-    # ── الاشتراك
     elif data == "SUBSCRIBE":
         user_id = query.from_user.id
         subs = load_subscribers()
@@ -279,7 +313,7 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         else:
             subs.add(user_id)
             save_subscribers(subs)
-            await query.answer("🔔 تم الاشتراك! ستصلك مسألة يومياً إن شاء الله", show_alert=True)
+            await query.answer("🔔 تم الاشتراك! ستصلك تذكيرات يومية إن شاء الله", show_alert=True)
 
     elif data == "UNSUBSCRIBE":
         user_id = query.from_user.id
@@ -291,7 +325,6 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             save_subscribers(subs)
             await query.answer("🔕 تم إلغاء الاشتراك.", show_alert=True)
 
-    # ── فتح قسم رئيسي
     elif data.startswith("CAT:"):
         cat_key = data[4:]
         if cat_key not in STRUCTURE:
@@ -303,7 +336,6 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             reply_markup=topics_keyboard(cat_key)
         )
 
-    # ── فتح موضوع (عرض الأقسام الفرعية)
     elif data.startswith("TOPIC:"):
         parts = data.split(":", 2)
         if len(parts) < 3:
@@ -318,7 +350,6 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             reply_markup=subtopics_keyboard(cat_key, topic_key)
         )
 
-    # ── عرض محتوى قسم فرعي
     elif data.startswith("SUB:"):
         parts = data.split(":", 3)
         if len(parts) < 4:
@@ -345,26 +376,12 @@ async def message_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await _do_search(update, text)
 
 
-# ─── وظيفة السؤال اليومي ─────────────────────────────────────────────────────
+# ─── وظائف الإرسال الجماعي ────────────────────────────────────────────────────
 
-async def send_daily_question(context: ContextTypes.DEFAULT_TYPE):
+async def _broadcast(context: ContextTypes.DEFAULT_TYPE, text: str):
     subs = load_subscribers()
     if not subs:
         return
-
-    idx = load_question_index()
-    q = DAILY_QUESTIONS[idx % len(DAILY_QUESTIONS)]
-    save_question_index(idx + 1)
-
-    today = datetime.date.today().strftime("%A %d/%m/%Y")
-    text = (
-        f"🌅 *السؤال اليومي — {today}*\n\n"
-        f"❓ *{q['q']}*\n\n"
-        f"{q['a']}\n\n"
-        "─────────────────\n"
-        "📚 للمزيد من العلم الشرعي اضغط /start"
-    )
-
     failed = []
     for user_id in list(subs):
         try:
@@ -374,12 +391,47 @@ async def send_daily_question(context: ContextTypes.DEFAULT_TYPE):
                 parse_mode="Markdown"
             )
         except Exception as e:
-            logger.warning(f"فشل إرسال السؤال لـ {user_id}: {e}")
+            logger.warning(f"فشل الإرسال لـ {user_id}: {e}")
             failed.append(user_id)
-
     if failed:
-        subs_updated = subs - set(failed)
-        save_subscribers(subs_updated)
+        save_subscribers(subs - set(failed))
+
+
+async def send_daily_question(context: ContextTypes.DEFAULT_TYPE):
+    idx = load_question_index()
+    q = DAILY_QUESTIONS[idx % len(DAILY_QUESTIONS)]
+    save_question_index(idx + 1)
+    today = datetime.date.today().strftime("%A %d/%m/%Y")
+    text = (
+        f"🌅 *السؤال اليومي — {today}*\n"
+        f"📅 {get_hijri_date()}\n\n"
+        f"❓ *{q['q']}*\n\n"
+        f"{q['a']}\n\n"
+        "─────────────────\n"
+        "📚 للمزيد من العلم الشرعي اضغط /start"
+    )
+    await _broadcast(context, text)
+
+
+async def send_wird_reminder(context: ContextTypes.DEFAULT_TYPE):
+    day_of_year = datetime.date.today().timetuple().tm_yday
+    text = get_wird_reminder(day_of_year)
+    await _broadcast(context, text)
+
+
+async def send_adhkar_sabah(context: ContextTypes.DEFAULT_TYPE):
+    text = get_adhkar_sabah_reminder()
+    await _broadcast(context, text)
+
+
+async def send_adhkar_masa(context: ContextTypes.DEFAULT_TYPE):
+    text = get_adhkar_masa_reminder()
+    await _broadcast(context, text)
+
+
+async def send_wife_dua(context: ContextTypes.DEFAULT_TYPE):
+    text = get_wife_dua()
+    await _broadcast(context, text)
 
 
 # ─── التشغيل ─────────────────────────────────────────────────────────────────
@@ -396,20 +448,48 @@ def main():
     app.add_handler(CommandHandler("subscribe", subscribe_command))
     app.add_handler(CommandHandler("unsubscribe", unsubscribe_command))
     app.add_handler(CommandHandler("daily", daily_command))
+    app.add_handler(CommandHandler("wird", wird_command))
+    app.add_handler(CommandHandler("dua", dua_command))
     app.add_handler(CommandHandler("stats", stats_command))
     app.add_handler(CommandHandler("search", search_command))
     app.add_handler(CallbackQueryHandler(button_handler))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, message_handler))
 
-    # السؤال اليومي — الساعة 7:00 صباحاً بتوقيت UTC (10 صباحاً بتوقيت مكة)
     job_queue: JobQueue = app.job_queue
+
+    # الجزائر UTC+1 — نطرح 1 ساعة للحصول على UTC
+    # 🌅 الورد القرآني — 6:00 صباحاً الجزائر = 5:00 UTC
+    job_queue.run_daily(
+        send_wird_reminder,
+        time=datetime.time(hour=5, minute=0, second=0),
+        name="wird_reminder"
+    )
+    # 🤲 أذكار الصباح — 6:30 الجزائر = 5:30 UTC
+    job_queue.run_daily(
+        send_adhkar_sabah,
+        time=datetime.time(hour=5, minute=30, second=0),
+        name="adhkar_sabah"
+    )
+    # ❓ السؤال اليومي — 10:00 الجزائر = 9:00 UTC
     job_queue.run_daily(
         send_daily_question,
-        time=datetime.time(hour=7, minute=0, second=0),
+        time=datetime.time(hour=9, minute=0, second=0),
         name="daily_question"
     )
+    # 🌆 أذكار المساء — 17:30 الجزائر = 16:30 UTC
+    job_queue.run_daily(
+        send_adhkar_masa,
+        time=datetime.time(hour=16, minute=30, second=0),
+        name="adhkar_masa"
+    )
+    # 🌙 دعاء المرأة الصابرة — 21:00 الجزائر = 20:00 UTC
+    job_queue.run_daily(
+        send_wife_dua,
+        time=datetime.time(hour=20, minute=0, second=0),
+        name="wife_dua"
+    )
 
-    logger.info("✅ بوت العلم الشرعي يعمل...")
+    logger.info("✅ بوت العلم الشرعي يعمل مع التذكيرات الخمسة اليومية...")
     app.run_polling(allowed_updates=Update.ALL_TYPES)
 
 
