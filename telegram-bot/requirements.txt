@@ -1,2 +1,5 @@
-python-telegram-bot==22.8
+python-telegram-bot[job-queue]==22.8
 python-dotenv==1.2.2
+hijri-converter==2.3.3
+APScheduler==3.10.4
+tzlocal==5.2
