@@ -19,8 +19,10 @@ from reminders import (
     get_wird_reminder,
     get_adhkar_sabah_reminder,
     get_adhkar_masa_reminder,
+    get_qiyam_reminder,
     get_hijri_date,
 )
+from prayer_times import compute_prayer_times, prayer_reminder_text, PRAYER_NAMES
 
 logging.basicConfig(
     format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
@@ -29,15 +31,45 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 # ─── مسارات الملفات ──────────────────────────────────────────────────────────
-SUBSCRIBERS_FILE = Path(__file__).parent / "subscribers.json"
+SUBSCRIBERS_FILE   = Path(__file__).parent / "subscribers.json"
 QUESTION_INDEX_FILE = Path(__file__).parent / "question_index.json"
+ALL_USERS_FILE     = Path(__file__).parent / "all_users.json"   # كل من استخدم البوت
+
+
+# ═══════════════════════════════════════════════════════════════════
+# إدارة المستخدمين
+# ═══════════════════════════════════════════════════════════════════
+
+def load_all_users() -> set:
+    """جميع المستخدمين الذين فتحوا البوت — يتلقون التذكيرات الإلزامية."""
+    if ALL_USERS_FILE.exists():
+        try:
+            return set(json.loads(ALL_USERS_FILE.read_text(encoding="utf-8")))
+        except Exception:
+            return set()
+    return set()
+
+
+def save_all_users(users: set):
+    ALL_USERS_FILE.write_text(
+        json.dumps(list(users), ensure_ascii=False, indent=2),
+        encoding="utf-8"
+    )
+
+
+def register_user(user_id: int):
+    """سجّل المستخدم في قائمة الكل تلقائياً."""
+    users = load_all_users()
+    if user_id not in users:
+        users.add(user_id)
+        save_all_users(users)
 
 
 def load_subscribers() -> set:
+    """المشتركون في السؤال اليومي ودعاء المرأة الصابرة فقط."""
     if SUBSCRIBERS_FILE.exists():
         try:
-            data = json.loads(SUBSCRIBERS_FILE.read_text(encoding="utf-8"))
-            return set(data)
+            return set(json.loads(SUBSCRIBERS_FILE.read_text(encoding="utf-8")))
         except Exception:
             return set()
     return set()
@@ -53,8 +85,7 @@ def save_subscribers(subs: set):
 def load_question_index() -> int:
     if QUESTION_INDEX_FILE.exists():
         try:
-            data = json.loads(QUESTION_INDEX_FILE.read_text(encoding="utf-8"))
-            return data.get("index", 0)
+            return json.loads(QUESTION_INDEX_FILE.read_text(encoding="utf-8")).get("index", 0)
         except Exception:
             return 0
     return 0
@@ -67,16 +98,55 @@ def save_question_index(idx: int):
     )
 
 
-# ─── بناء لوحة المفاتيح ───────────────────────────────────────────────────────
+# ═══════════════════════════════════════════════════════════════════
+# الإرسال الجماعي
+# ═══════════════════════════════════════════════════════════════════
+
+async def _broadcast_all(bot, text: str):
+    """أرسل لجميع المستخدمين — التذكيرات الإلزامية."""
+    users = load_all_users()
+    if not users:
+        return
+    failed = []
+    for uid in list(users):
+        try:
+            await bot.send_message(chat_id=uid, text=text, parse_mode="Markdown")
+        except Exception as e:
+            logger.warning(f"فشل الإرسال لـ {uid}: {e}")
+            failed.append(uid)
+    if failed:
+        save_all_users(users - set(failed))
+
+
+async def _broadcast_subscribers(bot, text: str):
+    """أرسل للمشتركين فقط — السؤال اليومي ودعاء المرأة."""
+    subs = load_subscribers()
+    if not subs:
+        return
+    failed = []
+    for uid in list(subs):
+        try:
+            await bot.send_message(chat_id=uid, text=text, parse_mode="Markdown")
+        except Exception as e:
+            logger.warning(f"فشل الإرسال لـ {uid}: {e}")
+            failed.append(uid)
+    if failed:
+        save_subscribers(subs - set(failed))
+
+
+# ═══════════════════════════════════════════════════════════════════
+# لوحات المفاتيح
+# ═══════════════════════════════════════════════════════════════════
 
 def main_menu_keyboard() -> InlineKeyboardMarkup:
     rows = []
     for cat_key, cat_data in STRUCTURE.items():
         rows.append([InlineKeyboardButton(cat_data["title"], callback_data=f"CAT:{cat_key}")])
     rows.append([InlineKeyboardButton("📅 سؤال اليوم", callback_data="DAILY_Q")])
+    rows.append([InlineKeyboardButton("🕌 مواقيت صلاة الجزائر اليوم", callback_data="PRAYER_TIMES")])
     rows.append([
-        InlineKeyboardButton("🔔 اشترك في التذكيرات", callback_data="SUBSCRIBE"),
-        InlineKeyboardButton("🔕 إلغاء الاشتراك", callback_data="UNSUBSCRIBE"),
+        InlineKeyboardButton("🔔 اشترك في السؤال اليومي", callback_data="SUBSCRIBE"),
+        InlineKeyboardButton("🔕 إلغاء", callback_data="UNSUBSCRIBE"),
     ])
     return InlineKeyboardMarkup(rows)
 
@@ -116,77 +186,101 @@ def back_to_topic_keyboard(cat_key: str, topic_key: str) -> InlineKeyboardMarkup
     ])
 
 
-# ─── المعالجات ────────────────────────────────────────────────────────────────
+# ═══════════════════════════════════════════════════════════════════
+# الأوامر الأساسية
+# ═══════════════════════════════════════════════════════════════════
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.effective_user
-    name = user.first_name if user else "أخي / أختي"
+    register_user(user.id)          # تسجيل تلقائي إلزامي
+    name  = user.first_name if user else "أخي / أختي"
     hijri = get_hijri_date()
+    times = compute_prayer_times(datetime.date.today())
     welcome = (
         f"السلام عليكم ورحمة الله وبركاته 🌿\n\n"
         f"📅 *{hijri}*\n\n"
         f"مرحباً يا *{name}* في بوت *العلم الشرعي للموحدين* 📚\n\n"
-        "هذا البوت جُمع فيه ما يحتاجه الأخ والأخت الموحدة من:\n"
-        "• 📗 العقيدة الصحيحة والتوحيد الخالص\n"
-        "• 📘 الفقه والعبادات بالتفصيل\n"
-        "• 🌸 علوم المرأة المسلمة كاملة\n"
+        "• 📗 العقيدة والتوحيد\n"
+        "• 📘 الفقه والعبادات\n"
+        "• 🌸 أحكام المرأة المسلمة\n"
         "• 🔵 أحكام الرجل المسلم\n"
-        "• 💎 تزكية النفس والأخلاق\n"
-        "• 📿 الأذكار والأدعية المأثورة\n"
-        "• 📖 القرآن وعلومه\n"
-        "• 📜 الحديث النبوي والسيرة\n"
-        "• 🌟 قصص الصحابة والصحابيات\n"
-        "• 📅 سؤال ديني يومي + تذكيرات يومية\n\n"
+        "• 💎 التزكية والأخلاق\n"
+        "• 📿 الأذكار والأدعية\n"
+        "• 📖 القرآن الكريم\n"
+        "• 📜 الحديث والسيرة\n"
+        "• 🌟 قصص الصحابة والصحابيات\n\n"
+        f"🕌 *مواقيت اليوم — الجزائر:*\n"
+        f"فجر {times['fajr'].strftime('%H:%M')} | ظهر {times['dhuhr'].strftime('%H:%M')} | "
+        f"عصر {times['asr'].strftime('%H:%M')} | مغرب {times['maghrib'].strftime('%H:%M')} | "
+        f"عشاء {times['isha'].strftime('%H:%M')}\n\n"
         "اختر من القائمة 👇"
     )
     await update.message.reply_text(
-        welcome,
-        parse_mode="Markdown",
-        reply_markup=main_menu_keyboard()
+        welcome, parse_mode="Markdown", reply_markup=main_menu_keyboard()
     )
 
 
 async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    register_user(update.effective_user.id)
     text = (
         "📋 *الأوامر المتاحة:*\n\n"
-        "/start — القائمة الرئيسية\n"
-        "/help — المساعدة\n"
-        "/search <كلمة> — البحث في المحتوى\n"
-        "/subscribe — الاشتراك في التذكيرات اليومية\n"
-        "/unsubscribe — إلغاء الاشتراك\n"
-        "/daily — سؤال اليوم الآن\n"
-        "/wird — ورد القرآن اليومي\n"
+        "/start — القائمة الرئيسية + مواقيت اليوم\n"
+        "/prayers — مواقيت الصلاة الآن\n"
+        "/wird — الورد القرآني اليومي\n"
         "/dua — دعاء المرأة الصابرة\n"
-        "/stats — إحصائيات البوت\n\n"
-        "📅 *التذكيرات اليومية للمشتركين:*\n"
-        "🌅 06:00 — الورد القرآني اليومي\n"
-        "🤲 06:30 — تذكير أذكار الصباح\n"
+        "/daily — سؤال اليوم\n"
+        "/stats — الإحصائيات\n"
+        "/search <كلمة> — البحث\n"
+        "/subscribe — الاشتراك في السؤال اليومي\n"
+        "/unsubscribe — إلغاء الاشتراك\n\n"
+        "📲 *التذكيرات الإلزامية لكل مستخدم:*\n"
+        "🌅 06:00 — الورد القرآني\n"
+        "🤲 06:30 — أذكار الصباح\n"
+        "🌆 17:30 — أذكار المساء\n"
+        "🌙 02:25 — قيام الليل (الثلث الأخير)\n"
+        "🕌 تنبيه قبل كل صلاة بـ 10 دقائق\n\n"
+        "📩 *للمشتركين فقط:*\n"
         "❓ 10:00 — سؤال شرعي يومي\n"
-        "🌆 17:30 — تذكير أذكار المساء\n"
-        "🌙 21:00 — دعاء المرأة الصابرة\n"
-        "_(التوقيت بتوقيت الجزائر)_\n\n"
-        "💡 يمكنك أيضاً كتابة أي كلمة مباشرةً للبحث التلقائي."
+        "🌙 21:00 — دعاء المرأة الصابرة\n\n"
+        "_(أوقات الجزائر UTC+1)_"
+    )
+    await update.message.reply_text(text, parse_mode="Markdown")
+
+
+async def prayers_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    register_user(update.effective_user.id)
+    hijri = get_hijri_date()
+    times = compute_prayer_times(datetime.date.today())
+    text = (
+        f"🕌 *مواقيت الصلاة — الجزائر*\n"
+        f"📅 {hijri}\n"
+        "━━━━━━━━━━━━━━━━━━━━━\n\n"
+        f"🌙 الفجر   ← *{times['fajr'].strftime('%H:%M')}*\n"
+        f"🌤️ الشروق ← *{times['sunrise'].strftime('%H:%M')}*\n"
+        f"☀️ الظهر  ← *{times['dhuhr'].strftime('%H:%M')}*\n"
+        f"🌤️ العصر  ← *{times['asr'].strftime('%H:%M')}*\n"
+        f"🌅 المغرب ← *{times['maghrib'].strftime('%H:%M')}*\n"
+        f"🌙 العشاء  ← *{times['isha'].strftime('%H:%M')}*\n\n"
+        "━━━━━━━━━━━━━━━━━━━━━\n"
+        "_الحساب: طريقة رابطة العالم الإسلامي — مدينة الجزائر_"
     )
     await update.message.reply_text(text, parse_mode="Markdown")
 
 
 async def subscribe_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
+    register_user(user_id)
     subs = load_subscribers()
     if user_id in subs:
-        await update.message.reply_text("✅ أنت مشترك بالفعل في التذكيرات اليومية!")
+        await update.message.reply_text("✅ أنت مشترك بالفعل في السؤال اليومي!")
         return
     subs.add(user_id)
     save_subscribers(subs)
     await update.message.reply_text(
-        "🔔 *تم الاشتراك بنجاح!*\n\n"
-        "ستصلك يومياً إن شاء الله:\n"
-        "🌅 الورد القرآني — 6:00 صباحاً\n"
-        "🤲 أذكار الصباح — 6:30 صباحاً\n"
+        "🔔 *تم الاشتراك في السؤال اليومي!*\n\n"
+        "ستصلك إضافةً للتذكيرات الإلزامية:\n"
         "❓ سؤال شرعي — 10:00 صباحاً\n"
-        "🌆 أذكار المساء — 5:30 مساءً\n"
-        "🌙 دعاء المرأة الصابرة — 9:00 مساءً\n"
-        "_(بتوقيت الجزائر)_\n\n"
+        "🌙 دعاء المرأة الصابرة — 9:00 مساءً\n\n"
         "لإلغاء الاشتراك: /unsubscribe",
         parse_mode="Markdown"
     )
@@ -196,61 +290,71 @@ async def unsubscribe_command(update: Update, context: ContextTypes.DEFAULT_TYPE
     user_id = update.effective_user.id
     subs = load_subscribers()
     if user_id not in subs:
-        await update.message.reply_text("أنت لست مشتركاً حالياً.")
+        await update.message.reply_text(
+            "أنت لست مشتركاً في السؤال اليومي.\n"
+            "⚠️ التذكيرات الإلزامية (الصلوات، الأذكار، القيام) تصلك دائماً."
+        )
         return
     subs.discard(user_id)
     save_subscribers(subs)
-    await update.message.reply_text("🔕 تم إلغاء اشتراكك. يمكنك الاشتراك مجدداً بـ /subscribe")
+    await update.message.reply_text(
+        "🔕 تم إلغاء اشتراكك في السؤال اليومي.\n"
+        "⚠️ التذكيرات الإلزامية (الصلوات، الأذكار، القيام) ستظل تصلك."
+    )
 
 
 async def daily_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    register_user(update.effective_user.id)
     idx = load_question_index()
-    q = DAILY_QUESTIONS[idx % len(DAILY_QUESTIONS)]
+    q   = DAILY_QUESTIONS[idx % len(DAILY_QUESTIONS)]
     text = (
         f"📅 *سؤال اليوم*\n\n"
         f"❓ *{q['q']}*\n\n"
         f"{q['a']}\n\n"
         "─────────────────\n"
-        "اشترك في التذكيرات اليومية: /subscribe"
+        "اشترك في السؤال اليومي: /subscribe"
     )
     await update.message.reply_text(text, parse_mode="Markdown")
 
 
 async def wird_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    day_of_year = datetime.date.today().timetuple().tm_yday
-    text = get_wird_reminder(day_of_year)
-    await update.message.reply_text(text, parse_mode="Markdown")
+    register_user(update.effective_user.id)
+    day = datetime.date.today().timetuple().tm_yday
+    await update.message.reply_text(get_wird_reminder(day), parse_mode="Markdown")
 
 
 async def dua_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    text = get_wife_dua()
-    await update.message.reply_text(text, parse_mode="Markdown")
+    register_user(update.effective_user.id)
+    await update.message.reply_text(get_wife_dua(), parse_mode="Markdown")
 
 
 async def stats_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    subs = load_subscribers()
-    total_content = sum(
-        len(topic["subtopics"])
+    register_user(update.effective_user.id)
+    all_users = load_all_users()
+    subs      = load_subscribers()
+    total     = sum(
+        len(t["subtopics"])
         for cat in STRUCTURE.values()
-        for topic in cat["topics"].values()
+        for t in cat["topics"].values()
     )
     text = (
         "📊 *إحصائيات البوت*\n\n"
-        f"👥 المشتركون في التذكيرات: *{len(subs)}*\n"
-        f"📚 عدد الأقسام الرئيسية: *{len(STRUCTURE)}*\n"
-        f"📋 عدد المواضيع الفرعية: *{total_content}*\n"
-        f"❓ عدد أسئلة اليوم المتوفرة: *{len(DAILY_QUESTIONS)}*\n"
+        f"👤 إجمالي المستخدمين: *{len(all_users)}*\n"
+        f"🔔 مشتركو السؤال اليومي: *{len(subs)}*\n"
+        f"📚 الأقسام الرئيسية: *{len(STRUCTURE)}*\n"
+        f"📋 الأقسام الفرعية: *{total}*\n"
+        f"❓ أسئلة اليوم المتوفرة: *{len(DAILY_QUESTIONS)}*\n"
         f"📅 {get_hijri_date()}\n"
     )
     await update.message.reply_text(text, parse_mode="Markdown")
 
 
 async def search_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    register_user(update.effective_user.id)
     query = " ".join(context.args).strip() if context.args else ""
     if not query:
         await update.message.reply_text(
-            "أرسل الكلمة بعد الأمر مثل:\n`/search الحيض`",
-            parse_mode="Markdown"
+            "أرسل الكلمة بعد الأمر مثل:\n`/search الحيض`", parse_mode="Markdown"
         )
         return
     await _do_search(update, query)
@@ -274,56 +378,79 @@ async def _do_search(update: Update, query: str):
     )
 
 
+# ═══════════════════════════════════════════════════════════════════
+# معالج الأزرار
+# ═══════════════════════════════════════════════════════════════════
+
 async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
     data = query.data
+    register_user(query.from_user.id)
 
     if data == "MAIN":
         await query.edit_message_text(
             f"🏠 *القائمة الرئيسية*\n📅 {get_hijri_date()}\n\nاختر القسم:",
-            parse_mode="Markdown",
-            reply_markup=main_menu_keyboard()
+            parse_mode="Markdown", reply_markup=main_menu_keyboard()
+        )
+
+    elif data == "PRAYER_TIMES":
+        times = compute_prayer_times(datetime.date.today())
+        hijri = get_hijri_date()
+        text = (
+            f"🕌 *مواقيت الصلاة — الجزائر*\n📅 {hijri}\n"
+            "━━━━━━━━━━━━━━━━━━━━━\n\n"
+            f"🌙 الفجر   ← *{times['fajr'].strftime('%H:%M')}*\n"
+            f"🌤️ الشروق ← *{times['sunrise'].strftime('%H:%M')}*\n"
+            f"☀️ الظهر  ← *{times['dhuhr'].strftime('%H:%M')}*\n"
+            f"🌤️ العصر  ← *{times['asr'].strftime('%H:%M')}*\n"
+            f"🌅 المغرب ← *{times['maghrib'].strftime('%H:%M')}*\n"
+            f"🌙 العشاء  ← *{times['isha'].strftime('%H:%M')}*\n\n"
+            "━━━━━━━━━━━━━━━━━━━━━\n"
+            "_رابطة العالم الإسلامي — مدينة الجزائر_"
+        )
+        await query.edit_message_text(
+            text, parse_mode="Markdown",
+            reply_markup=InlineKeyboardMarkup([
+                [InlineKeyboardButton("🏠 الرئيسية", callback_data="MAIN")]
+            ])
         )
 
     elif data == "DAILY_Q":
         idx = load_question_index()
-        q = DAILY_QUESTIONS[idx % len(DAILY_QUESTIONS)]
+        q   = DAILY_QUESTIONS[idx % len(DAILY_QUESTIONS)]
         text = (
-            f"📅 *سؤال اليوم*\n\n"
-            f"❓ *{q['q']}*\n\n"
-            f"{q['a']}\n\n"
+            f"📅 *سؤال اليوم*\n\n❓ *{q['q']}*\n\n{q['a']}\n\n"
             "─────────────────\n"
-            "اشترك في التذكيرات اليومية عبر الزر أدناه 👇"
+            "اشترك في السؤال اليومي عبر الزر أدناه 👇"
         )
         await query.edit_message_text(
-            text,
-            parse_mode="Markdown",
+            text, parse_mode="Markdown",
             reply_markup=InlineKeyboardMarkup([
-                [InlineKeyboardButton("🔔 اشترك", callback_data="SUBSCRIBE")],
+                [InlineKeyboardButton("🔔 اشترك في السؤال اليومي", callback_data="SUBSCRIBE")],
                 [InlineKeyboardButton("🏠 الرئيسية", callback_data="MAIN")],
             ])
         )
 
     elif data == "SUBSCRIBE":
-        user_id = query.from_user.id
+        uid  = query.from_user.id
         subs = load_subscribers()
-        if user_id in subs:
+        if uid in subs:
             await query.answer("✅ أنت مشترك بالفعل!", show_alert=True)
         else:
-            subs.add(user_id)
+            subs.add(uid)
             save_subscribers(subs)
-            await query.answer("🔔 تم الاشتراك! ستصلك تذكيرات يومية إن شاء الله", show_alert=True)
+            await query.answer("🔔 تم الاشتراك! ستصلك أسئلة شرعية يومياً", show_alert=True)
 
     elif data == "UNSUBSCRIBE":
-        user_id = query.from_user.id
+        uid  = query.from_user.id
         subs = load_subscribers()
-        if user_id not in subs:
-            await query.answer("أنت لست مشتركاً.", show_alert=True)
+        if uid not in subs:
+            await query.answer("أنت لست مشتركاً في السؤال اليومي.", show_alert=True)
         else:
-            subs.discard(user_id)
+            subs.discard(uid)
             save_subscribers(subs)
-            await query.answer("🔕 تم إلغاء الاشتراك.", show_alert=True)
+            await query.answer("🔕 تم إلغاء اشتراكك في السؤال اليومي.", show_alert=True)
 
     elif data.startswith("CAT:"):
         cat_key = data[4:]
@@ -332,8 +459,7 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         cat = STRUCTURE[cat_key]
         await query.edit_message_text(
             f"*{cat['title']}*\n\nاختر الموضوع:",
-            parse_mode="Markdown",
-            reply_markup=topics_keyboard(cat_key)
+            parse_mode="Markdown", reply_markup=topics_keyboard(cat_key)
         )
 
     elif data.startswith("TOPIC:"):
@@ -346,8 +472,7 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         topic = STRUCTURE[cat_key]["topics"][topic_key]
         await query.edit_message_text(
             f"📂 *{topic['title']}*\n\nاختر القسم الفرعي:",
-            parse_mode="Markdown",
-            reply_markup=subtopics_keyboard(cat_key, topic_key)
+            parse_mode="Markdown", reply_markup=subtopics_keyboard(cat_key, topic_key)
         )
 
     elif data.startswith("SUB:"):
@@ -360,81 +485,105 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         except KeyError:
             return
         await query.edit_message_text(
-            sub["text"],
-            parse_mode="Markdown",
+            sub["text"], parse_mode="Markdown",
             reply_markup=back_to_topic_keyboard(cat_key, topic_key)
         )
 
 
 async def message_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    register_user(update.effective_user.id)
     text = (update.message.text or "").strip()
     if len(text) < 2:
-        await update.message.reply_text(
-            "اكتب كلمة للبحث أو اضغط /start للقائمة 🌿"
-        )
+        await update.message.reply_text("اكتب كلمة للبحث أو اضغط /start للقائمة 🌿")
         return
     await _do_search(update, text)
 
 
-# ─── وظائف الإرسال الجماعي ────────────────────────────────────────────────────
+# ═══════════════════════════════════════════════════════════════════
+# وظائف الجدولة اليومية
+# ═══════════════════════════════════════════════════════════════════
 
-async def _broadcast(context: ContextTypes.DEFAULT_TYPE, text: str):
-    subs = load_subscribers()
-    if not subs:
-        return
-    failed = []
-    for user_id in list(subs):
-        try:
-            await context.bot.send_message(
-                chat_id=user_id,
-                text=text,
-                parse_mode="Markdown"
-            )
-        except Exception as e:
-            logger.warning(f"فشل الإرسال لـ {user_id}: {e}")
-            failed.append(user_id)
-    if failed:
-        save_subscribers(subs - set(failed))
+async def job_wird(context: ContextTypes.DEFAULT_TYPE):
+    day = datetime.date.today().timetuple().tm_yday
+    await _broadcast_all(context.bot, get_wird_reminder(day))
 
 
-async def send_daily_question(context: ContextTypes.DEFAULT_TYPE):
+async def job_adhkar_sabah(context: ContextTypes.DEFAULT_TYPE):
+    await _broadcast_all(context.bot, get_adhkar_sabah_reminder())
+
+
+async def job_adhkar_masa(context: ContextTypes.DEFAULT_TYPE):
+    await _broadcast_all(context.bot, get_adhkar_masa_reminder())
+
+
+async def job_qiyam(context: ContextTypes.DEFAULT_TYPE):
+    await _broadcast_all(context.bot, get_qiyam_reminder())
+
+
+async def job_daily_question(context: ContextTypes.DEFAULT_TYPE):
     idx = load_question_index()
-    q = DAILY_QUESTIONS[idx % len(DAILY_QUESTIONS)]
+    q   = DAILY_QUESTIONS[idx % len(DAILY_QUESTIONS)]
     save_question_index(idx + 1)
     today = datetime.date.today().strftime("%A %d/%m/%Y")
     text = (
         f"🌅 *السؤال اليومي — {today}*\n"
         f"📅 {get_hijri_date()}\n\n"
-        f"❓ *{q['q']}*\n\n"
-        f"{q['a']}\n\n"
+        f"❓ *{q['q']}*\n\n{q['a']}\n\n"
         "─────────────────\n"
-        "📚 للمزيد من العلم الشرعي اضغط /start"
+        "📚 للمزيد اضغط /start"
     )
-    await _broadcast(context, text)
+    await _broadcast_subscribers(context.bot, text)
 
 
-async def send_wird_reminder(context: ContextTypes.DEFAULT_TYPE):
-    day_of_year = datetime.date.today().timetuple().tm_yday
-    text = get_wird_reminder(day_of_year)
-    await _broadcast(context, text)
+async def job_wife_dua(context: ContextTypes.DEFAULT_TYPE):
+    await _broadcast_subscribers(context.bot, get_wife_dua())
 
 
-async def send_adhkar_sabah(context: ContextTypes.DEFAULT_TYPE):
-    text = get_adhkar_sabah_reminder()
-    await _broadcast(context, text)
+# ─── إرسال تنبيه صلاة واحدة ──────────────────────────────────────
+async def _send_prayer_alert(context: ContextTypes.DEFAULT_TYPE):
+    """يُستدعى من run_once — data هو اسم الصلاة."""
+    prayer_key  = context.job.data["prayer"]
+    prayer_time = context.job.data["time"]
+    hijri       = get_hijri_date()
+    text = prayer_reminder_text(prayer_key, prayer_time, hijri)
+    await _broadcast_all(context.bot, text)
 
 
-async def send_adhkar_masa(context: ContextTypes.DEFAULT_TYPE):
-    text = get_adhkar_masa_reminder()
-    await _broadcast(context, text)
+# ─── إعادة جدولة مواقيت الصلاة كل يوم ──────────────────────────
+async def job_schedule_prayers(context: ContextTypes.DEFAULT_TYPE):
+    """
+    يعمل يومياً عند 00:05 UTC (01:05 الجزائر).
+    يحسب مواقيت اليوم ويجدول run_once لكل صلاة.
+    """
+    today = datetime.date.today()
+    times = compute_prayer_times(today)
+    now   = datetime.datetime.utcnow()
+
+    for prayer_key in ("fajr", "dhuhr", "asr", "maghrib", "isha"):
+        pt = times[prayer_key]
+        # تحويل وقت الصلاة (الجزائر UTC+1) إلى UTC
+        utc_h = (pt.hour - 1) % 24
+        prayer_utc = datetime.datetime(
+            today.year, today.month, today.day,
+            utc_h, pt.minute, 0
+        )
+        # التنبيه 10 دقائق قبل الصلاة
+        alert_utc = prayer_utc - datetime.timedelta(minutes=10)
+
+        if alert_utc > now:
+            delay = (alert_utc - now).total_seconds()
+            context.job_queue.run_once(
+                _send_prayer_alert,
+                when=delay,
+                data={"prayer": prayer_key, "time": pt},
+                name=f"prayer_{prayer_key}_{today.isoformat()}"
+            )
+            logger.info(f"⏰ جُدول تنبيه {prayer_key} الساعة {pt.strftime('%H:%M')} الجزائر")
 
 
-async def send_wife_dua(context: ContextTypes.DEFAULT_TYPE):
-    text = get_wife_dua()
-    await _broadcast(context, text)
-
-
-# ─── التشغيل ─────────────────────────────────────────────────────────────────
+# ═══════════════════════════════════════════════════════════════════
+# التشغيل
+# ═══════════════════════════════════════════════════════════════════
 
 def main():
     token = os.environ.get("TELEGRAM_BOT_TOKEN")
@@ -443,53 +592,47 @@ def main():
 
     app = Application.builder().token(token).build()
 
-    app.add_handler(CommandHandler("start", start))
-    app.add_handler(CommandHandler("help", help_command))
-    app.add_handler(CommandHandler("subscribe", subscribe_command))
+    # ─── الأوامر
+    app.add_handler(CommandHandler("start",       start))
+    app.add_handler(CommandHandler("help",        help_command))
+    app.add_handler(CommandHandler("prayers",     prayers_command))
+    app.add_handler(CommandHandler("subscribe",   subscribe_command))
     app.add_handler(CommandHandler("unsubscribe", unsubscribe_command))
-    app.add_handler(CommandHandler("daily", daily_command))
-    app.add_handler(CommandHandler("wird", wird_command))
-    app.add_handler(CommandHandler("dua", dua_command))
-    app.add_handler(CommandHandler("stats", stats_command))
-    app.add_handler(CommandHandler("search", search_command))
+    app.add_handler(CommandHandler("daily",       daily_command))
+    app.add_handler(CommandHandler("wird",        wird_command))
+    app.add_handler(CommandHandler("dua",         dua_command))
+    app.add_handler(CommandHandler("stats",       stats_command))
+    app.add_handler(CommandHandler("search",      search_command))
     app.add_handler(CallbackQueryHandler(button_handler))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, message_handler))
 
-    job_queue: JobQueue = app.job_queue
+    jq: JobQueue = app.job_queue
 
-    # الجزائر UTC+1 — نطرح 1 ساعة للحصول على UTC
-    # 🌅 الورد القرآني — 6:00 صباحاً الجزائر = 5:00 UTC
-    job_queue.run_daily(
-        send_wird_reminder,
-        time=datetime.time(hour=5, minute=0, second=0),
-        name="wird_reminder"
-    )
-    # 🤲 أذكار الصباح — 6:30 الجزائر = 5:30 UTC
-    job_queue.run_daily(
-        send_adhkar_sabah,
-        time=datetime.time(hour=5, minute=30, second=0),
-        name="adhkar_sabah"
-    )
-    # ❓ السؤال اليومي — 10:00 الجزائر = 9:00 UTC
-    job_queue.run_daily(
-        send_daily_question,
-        time=datetime.time(hour=9, minute=0, second=0),
-        name="daily_question"
-    )
+    # ══ تذكيرات إلزامية لكل المستخدمين (UTC = الجزائر - 1 ساعة) ══
+
+    # 🌅 الورد القرآني — 06:00 الجزائر = 05:00 UTC
+    jq.run_daily(job_wird,         datetime.time(5,  0), name="wird")
+    # 🤲 أذكار الصباح — 06:30 الجزائر = 05:30 UTC
+    jq.run_daily(job_adhkar_sabah, datetime.time(5, 30), name="adhkar_sabah")
     # 🌆 أذكار المساء — 17:30 الجزائر = 16:30 UTC
-    job_queue.run_daily(
-        send_adhkar_masa,
-        time=datetime.time(hour=16, minute=30, second=0),
-        name="adhkar_masa"
-    )
-    # 🌙 دعاء المرأة الصابرة — 21:00 الجزائر = 20:00 UTC
-    job_queue.run_daily(
-        send_wife_dua,
-        time=datetime.time(hour=20, minute=0, second=0),
-        name="wife_dua"
-    )
+    jq.run_daily(job_adhkar_masa,  datetime.time(16, 30), name="adhkar_masa")
+    # 🌙 قيام الليل — 02:25 الجزائر = 01:25 UTC
+    jq.run_daily(job_qiyam,        datetime.time(1, 25), name="qiyam")
 
-    logger.info("✅ بوت العلم الشرعي يعمل مع التذكيرات الخمسة اليومية...")
+    # 🕌 جدولة مواقيت الصلاة — تُعاد يومياً الساعة 00:05 UTC
+    jq.run_daily(job_schedule_prayers, datetime.time(0, 5), name="schedule_prayers")
+
+    # ══ تذكيرات للمشتركين فقط ══
+
+    # ❓ السؤال اليومي — 10:00 الجزائر = 09:00 UTC
+    jq.run_daily(job_daily_question, datetime.time(9,  0), name="daily_question")
+    # 🌙 دعاء المرأة الصابرة — 21:00 الجزائر = 20:00 UTC
+    jq.run_daily(job_wife_dua,       datetime.time(20, 0), name="wife_dua")
+
+    # ── جدول صلوات اليوم الأول فور الإقلاع (بعد 10 ثوانٍ)
+    jq.run_once(job_schedule_prayers, when=10, name="schedule_prayers_startup")
+
+    logger.info("✅ البوت يعمل — 7 تذكيرات يومية + مواقيت الصلوات الخمس")
     app.run_polling(allowed_updates=Update.ALL_TYPES)
 
 
