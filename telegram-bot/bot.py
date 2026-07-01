@@ -13,7 +13,7 @@ from telegram.ext import (
     filters,
     ContextTypes,
 )
-from content import STRUCTURE, DAILY_QUESTIONS
+from content import STRUCTURE, DAILY_QUESTIONS, QUIZ_QUESTIONS
 from reminders import (
     get_wife_dua,
     get_wird_reminder,
@@ -174,6 +174,15 @@ def subtopics_keyboard(cat_key: str, topic_key: str) -> InlineKeyboardMarkup:
         InlineKeyboardButton("🏠 الرئيسية", callback_data="MAIN"),
     ])
     return InlineKeyboardMarkup(rows)
+
+
+def quiz_keyboard(idx: int) -> InlineKeyboardMarkup:
+    q = QUIZ_QUESTIONS[idx % len(QUIZ_QUESTIONS)]
+    return InlineKeyboardMarkup([
+        [InlineKeyboardButton(q["choices"][0], callback_data=f"QUIZ_ANS:{idx}:0")],
+        [InlineKeyboardButton(q["choices"][1], callback_data=f"QUIZ_ANS:{idx}:1")],
+        [InlineKeyboardButton("💡 مساعدة — اعطني تلميح", callback_data=f"QUIZ_HINT:{idx}")],
+    ])
 
 
 def back_to_topic_keyboard(cat_key: str, topic_key: str) -> InlineKeyboardMarkup:
@@ -451,6 +460,27 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             subs.discard(uid)
             save_subscribers(subs)
             await query.answer("🔕 تم إلغاء اشتراكك في السؤال اليومي.", show_alert=True)
+
+    elif data.startswith("QUIZ_ANS:"):
+        parts = data.split(":")
+        idx, choice = int(parts[1]), int(parts[2])
+        q = QUIZ_QUESTIONS[idx % len(QUIZ_QUESTIONS)]
+        if choice == q["correct"]:
+            result_text = q["explanation"]
+        else:
+            result_text = q["wrong"]
+        await query.edit_message_text(
+            f"📅 {get_hijri_date()}\n\n{result_text}",
+            parse_mode="Markdown",
+            reply_markup=InlineKeyboardMarkup([
+                [InlineKeyboardButton("🏠 الرئيسية", callback_data="MAIN")]
+            ])
+        )
+
+    elif data.startswith("QUIZ_HINT:"):
+        idx = int(data.split(":")[1])
+        q   = QUIZ_QUESTIONS[idx % len(QUIZ_QUESTIONS)]
+        await query.answer(q["hint"], show_alert=True)
 
     elif data.startswith("CAT:"):
         cat_key = data[4:]
