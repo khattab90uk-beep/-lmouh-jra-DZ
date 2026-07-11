@@ -918,7 +918,24 @@ def main():
     jq.run_once(job_schedule_prayers, when=10, name="schedule_prayers_startup")
 
     logger.info("✅ البوت يعمل — 31 ولاية + 9 وظائف يومية")
-    app.run_polling(allowed_updates=Update.ALL_TYPES)
+
+    # ── Railway → webhook | أي بيئة ثانية → polling ────────────────
+    railway_domain = os.environ.get("RAILWAY_PUBLIC_DOMAIN", "").strip()
+    port           = int(os.environ.get("PORT", 0))
+
+    if railway_domain and port:
+        webhook_url = f"https://{railway_domain}/{token}"
+        logger.info(f"🌐 وضع Webhook على {webhook_url} — PORT={port}")
+        app.run_webhook(
+            listen="0.0.0.0",
+            port=port,
+            url_path=token,
+            webhook_url=webhook_url,
+            allowed_updates=Update.ALL_TYPES,
+        )
+    else:
+        logger.info("🔄 وضع Polling (تطوير)")
+        app.run_polling(allowed_updates=Update.ALL_TYPES)
 
 
 if __name__ == "__main__":
