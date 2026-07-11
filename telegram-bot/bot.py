@@ -22,7 +22,7 @@ from reminders import (
     get_qiyam_reminder,
     get_hijri_date,
 )
-from prayer_times import compute_prayer_times, prayer_reminder_text, PRAYER_NAMES
+from prayer_times import compute_prayer_times, prayer_reminder_text
 
 logging.basicConfig(
     format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
@@ -569,6 +569,37 @@ async def job_wife_dua(context: ContextTypes.DEFAULT_TYPE):
     await _broadcast_subscribers(context.bot, get_wife_dua())
 
 
+async def job_daily_quiz(context: ContextTypes.DEFAULT_TYPE):
+    """يُرسل سؤال الاختبار التفاعلي للمشتركين — 08:00 الجزائر."""
+    idx = load_question_index() % len(QUIZ_QUESTIONS)
+    q   = QUIZ_QUESTIONS[idx]
+    hijri = get_hijri_date()
+    text = (
+        f"🧠 *اختبار اليوم*\n"
+        f"📅 {hijri}\n"
+        "━━━━━━━━━━━━━━━━━━━━━\n\n"
+        f"{q['q']}\n\n"
+        "_اختر الجواب الصحيح 👇_"
+    )
+    subs = load_subscribers()
+    if not subs:
+        return
+    failed = []
+    for uid in list(subs):
+        try:
+            await context.bot.send_message(
+                chat_id=uid,
+                text=text,
+                parse_mode="Markdown",
+                reply_markup=quiz_keyboard(idx),
+            )
+        except Exception as e:
+            logger.warning(f"فشل إرسال الاختبار لـ {uid}: {e}")
+            failed.append(uid)
+    if failed:
+        save_subscribers(subs - set(failed))
+
+
 # ─── إرسال تنبيه صلاة واحدة ──────────────────────────────────────
 async def _send_prayer_alert(context: ContextTypes.DEFAULT_TYPE):
     """يُستدعى من run_once — data هو اسم الصلاة."""
@@ -654,9 +685,11 @@ def main():
 
     # ══ تذكيرات للمشتركين فقط ══
 
+    # 🧠 اختبار تفاعلي — 08:00 الجزائر = 07:00 UTC
+    jq.run_daily(job_daily_quiz,     datetime.time(7,  0), name="daily_quiz")
     # ❓ السؤال اليومي — 10:00 الجزائر = 09:00 UTC
     jq.run_daily(job_daily_question, datetime.time(9,  0), name="daily_question")
-    # 🌙 دعاء المرأة الصابرة — 21:00 الجزائر = 20:00 UTC
+    # 🌙 دعاء زوجة المجاهد — 21:00 الجزائر = 20:00 UTC
     jq.run_daily(job_wife_dua,       datetime.time(20, 0), name="wife_dua")
 
     # ── جدول صلوات اليوم الأول فور الإقلاع (بعد 10 ثوانٍ)
