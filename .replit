@@ -45,4 +45,4 @@ channel = "stable-25_05"
 [userenv]
 
 [userenv.shared]
-TELEGRAM_BOT_TOKEN = "8096806336:AAHev_49ZrTGWB5s0dsXaobSF1GNti3Vwok"
+TELEGRAM_BOT_TOKEN = "8983118811:AAHHmVWJ05iEz4dsTRseEIhQxOSELlfG_CA"

@@ -194,7 +194,7 @@ def main_reply_keyboard() -> ReplyKeyboardMarkup:
         rows,
         resize_keyboard=True,
         one_time_keyboard=False,
-        is_persistent=True,
+        is_persistent=False,
     )
 
 
