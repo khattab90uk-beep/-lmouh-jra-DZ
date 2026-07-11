@@ -28,6 +28,8 @@ from reminders import (
     get_adhkar_masa_reminder,
     get_qiyam_reminder,
     get_hijri_date,
+    get_owner_dua,
+    OWNER_DUA,
 )
 from prayer_times import (
     compute_prayer_times,
@@ -304,7 +306,10 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         f"فجر {times['fajr'].strftime('%H:%M')} | ظهر {times['dhuhr'].strftime('%H:%M')} | "
         f"عصر {times['asr'].strftime('%H:%M')} | مغرب {times['maghrib'].strftime('%H:%M')} | "
         f"عشاء {times['isha'].strftime('%H:%M')}\n\n"
-        "اختر من القائمة 👇"
+        "اختر من القائمة 👇\n\n"
+        "━━━━━━━━━━━━━━━━━━━━━\n"
+        "🤲 اللهم اجعل هذا البوت في ميزان حسنات صاحبته\n"
+        "*رَيْحَانَةُ المَغْرِبِ الأَوْسَطِ الأَنْدَلُسِيَّة* — غفر الله لها 🌿"
     )
     await update.message.reply_text(
         welcome, parse_mode="Markdown", reply_markup=main_reply_keyboard()
