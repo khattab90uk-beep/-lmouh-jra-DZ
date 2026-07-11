@@ -3,7 +3,14 @@ import json
 import logging
 import datetime
 from pathlib import Path
-from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
+from telegram import (
+    Update,
+    InlineKeyboardButton,
+    InlineKeyboardMarkup,
+    ReplyKeyboardMarkup,
+    KeyboardButton,
+    ReplyKeyboardRemove,
+)
 from telegram.ext import (
     Application,
     CommandHandler,
@@ -154,17 +161,39 @@ async def _broadcast_subscribers(bot, text: str):
 # لوحات المفاتيح
 # ═══════════════════════════════════════════════════════════════════
 
-def main_menu_keyboard() -> InlineKeyboardMarkup:
-    rows = []
+# ─── خريطة أزرار القائمة الرئيسية ───────────────────────────────
+# نص الزر → callback_data (يعالجه message_handler)
+REPLY_BUTTONS: dict[str, str] = {}
+
+def _build_reply_buttons():
     for cat_key, cat_data in STRUCTURE.items():
-        rows.append([InlineKeyboardButton(cat_data["title"], callback_data=f"CAT:{cat_key}")])
-    rows.append([InlineKeyboardButton("📅 سؤال اليوم", callback_data="DAILY_Q")])
-    rows.append([InlineKeyboardButton("🗺️ اختر ولايتك — مواقيت الصلاة", callback_data="WILAYA_MENU")])
-    rows.append([
-        InlineKeyboardButton("🔔 اشترك في الأسئلة اليومية", callback_data="SUBSCRIBE"),
-        InlineKeyboardButton("🔕 إلغاء", callback_data="UNSUBSCRIBE"),
-    ])
-    return InlineKeyboardMarkup(rows)
+        REPLY_BUTTONS[cat_data["title"]] = f"CAT:{cat_key}"
+    REPLY_BUTTONS["📅 سؤال اليوم"]              = "DAILY_Q"
+    REPLY_BUTTONS["🗺️ اختر ولايتك"]             = "WILAYA_MENU"
+    REPLY_BUTTONS["🕌 مواقيت الصلاة"]           = "PRAYERS"
+    REPLY_BUTTONS["📊 إحصائيات"]                = "STATS"
+    REPLY_BUTTONS["🔔 اشترك"]                   = "SUBSCRIBE"
+    REPLY_BUTTONS["🔕 إلغاء الاشتراك"]          = "UNSUBSCRIBE"
+
+
+def main_reply_keyboard() -> ReplyKeyboardMarkup:
+    """القائمة الرئيسية الدائمة أسفل الشاشة — تظهر/تختفي بزر المربع."""
+    cats = list(STRUCTURE.values())
+    rows = []
+    for i in range(0, len(cats), 2):
+        row = [cats[i]["title"]]
+        if i + 1 < len(cats):
+            row.append(cats[i + 1]["title"])
+        rows.append(row)
+    rows.append(["📅 سؤال اليوم",     "🗺️ اختر ولايتك"])
+    rows.append(["🕌 مواقيت الصلاة",  "📊 إحصائيات"])
+    rows.append(["🔔 اشترك",          "🔕 إلغاء الاشتراك"])
+    return ReplyKeyboardMarkup(
+        rows,
+        resize_keyboard=True,
+        one_time_keyboard=False,
+        is_persistent=True,
+    )
 
 
 def wilaya_menu_keyboard() -> InlineKeyboardMarkup:
@@ -278,7 +307,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "اختر من القائمة 👇"
     )
     await update.message.reply_text(
-        welcome, parse_mode="Markdown", reply_markup=main_menu_keyboard()
+        welcome, parse_mode="Markdown", reply_markup=main_reply_keyboard()
     )
 
 async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -449,8 +478,14 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     # ── الرئيسية ──────────────────────────────────────────────────
     if data == "MAIN":
         await query.edit_message_text(
-            f"🏠 *القائمة الرئيسية*\n📅 {get_hijri_date()}\n\nاختر القسم:",
-            parse_mode="Markdown", reply_markup=main_menu_keyboard()
+            f"🏠 *القائمة الرئيسية*\n📅 {get_hijri_date()}\n\n"
+            "استخدم الأزرار أسفل الشاشة للتنقل 👇",
+            parse_mode="Markdown",
+        )
+        await context.bot.send_message(
+            chat_id=uid,
+            text="اختر من القائمة 👇",
+            reply_markup=main_reply_keyboard(),
         )
 
     # ── قائمة الولايات ────────────────────────────────────────────
@@ -579,10 +614,114 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 async def message_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    register_user(update.effective_user.id)
+    uid  = update.effective_user.id
+    register_user(uid)
     text = (update.message.text or "").strip()
+
+    # ── زر من القائمة الرئيسية ReplyKeyboard ──────────────────────
+    action = REPLY_BUTTONS.get(text)
+    if action:
+        if action.startswith("CAT:"):
+            cat_key = action[4:]
+            if cat_key in STRUCTURE:
+                cat = STRUCTURE[cat_key]
+                await update.message.reply_text(
+                    f"*{cat['title']}*\n\nاختر الموضوع:",
+                    parse_mode="Markdown",
+                    reply_markup=topics_keyboard(cat_key),
+                )
+            return
+
+        if action == "DAILY_Q":
+            idx = load_question_index()
+            q   = DAILY_QUESTIONS[idx % len(DAILY_QUESTIONS)]
+            await update.message.reply_text(
+                f"📅 *سؤال اليوم*\n\n❓ *{q['q']}*\n\n{q['a']}\n\n"
+                "─────────────────\nاشترك لتصلك الأسئلة يومياً 🔔",
+                parse_mode="Markdown",
+            )
+            return
+
+        if action == "WILAYA_MENU":
+            wkey = get_user_wilaya(uid)
+            w    = WILAYAS[wkey]
+            await update.message.reply_text(
+                f"🗺️ *اختر ولايتك*\n\n"
+                f"ولايتك الحالية: *{w['name']}*\n\n"
+                "اضغط على اسم ولايتك لتفعيل تنبيهات الصلاة 👇",
+                parse_mode="Markdown",
+                reply_markup=wilaya_menu_keyboard(),
+            )
+            return
+
+        if action == "PRAYERS":
+            wkey  = get_user_wilaya(uid)
+            hijri = get_hijri_date()
+            text_ = _format_wilaya_times(wkey, datetime.date.today(), hijri)
+            await update.message.reply_text(
+                text_, parse_mode="Markdown",
+                reply_markup=InlineKeyboardMarkup([
+                    [InlineKeyboardButton("🗺️ غيّر ولايتك", callback_data="WILAYA_MENU")]
+                ]),
+            )
+            return
+
+        if action == "STATS":
+            all_users  = load_all_users()
+            subs       = load_subscribers()
+            user_wils  = load_user_wilayas()
+            total_subs = sum(
+                len(t["subtopics"])
+                for cat in STRUCTURE.values()
+                for t in cat["topics"].values()
+            )
+            await update.message.reply_text(
+                "📊 *إحصائيات البوت*\n\n"
+                f"👤 إجمالي المستخدمين: *{len(all_users)}*\n"
+                f"🔔 المشتركون في الأسئلة: *{len(subs)}*\n"
+                f"🗺️ اختاروا ولاياتهم: *{len(user_wils)}*\n"
+                f"📚 الأقسام الرئيسية: *{len(STRUCTURE)}*\n"
+                f"📋 الأقسام الفرعية: *{total_subs}*\n"
+                f"🧠 أسئلة الاختبار: *{len(QUIZ_QUESTIONS)}*\n"
+                f"📅 {get_hijri_date()}",
+                parse_mode="Markdown",
+            )
+            return
+
+        if action == "SUBSCRIBE":
+            subs = load_subscribers()
+            if uid in subs:
+                await update.message.reply_text("✅ أنت مشترك بالفعل في الأسئلة اليومية!")
+            else:
+                subs.add(uid)
+                save_subscribers(subs)
+                await update.message.reply_text(
+                    "🔔 *تم الاشتراك!*\n\n"
+                    "ستصلك إضافةً للتذكيرات الإلزامية:\n"
+                    "🧠 اختبار تفاعلي — 08:00 صباحاً\n"
+                    "❓ سؤال شرعي — 10:00 صباحاً\n"
+                    "🌙 دعاء زوجة المجاهد — 9:00 مساءً\n\n"
+                    "لإلغاء الاشتراك اضغط: 🔕 إلغاء الاشتراك",
+                    parse_mode="Markdown",
+                )
+            return
+
+        if action == "UNSUBSCRIBE":
+            subs = load_subscribers()
+            if uid not in subs:
+                await update.message.reply_text(
+                    "أنت لست مشتركاً.\n"
+                    "⚠️ التذكيرات الإلزامية والصلوات تصلك دائماً."
+                )
+            else:
+                subs.discard(uid)
+                save_subscribers(subs)
+                await update.message.reply_text("🔕 تم إلغاء اشتراكك في الأسئلة اليومية.")
+            return
+
+    # ── بحث نصي حر ────────────────────────────────────────────────
     if len(text) < 2:
-        await update.message.reply_text("اكتب كلمة للبحث أو اضغط /start للقائمة 🌿")
+        await update.message.reply_text("اكتب كلمة للبحث أو استخدم الأزرار أسفل الشاشة 🌿")
         return
     await _do_search(update, text)
 
@@ -736,6 +875,9 @@ def main():
     token = os.environ.get("TELEGRAM_BOT_TOKEN")
     if not token:
         raise ValueError("TELEGRAM_BOT_TOKEN غير موجود في متغيرات البيئة!")
+
+    # بناء خريطة أزرار ReplyKeyboard من STRUCTURE (بعد استيراده)
+    _build_reply_buttons()
 
     app = Application.builder().token(token).build()
 
