@@ -1,45 +1,26 @@
-# [Project name]
+# بوت تيليجرام إسلامي (تذكيرات، أوقات الصلاة، أسئلة)
 
-_Replace the heading above with the project's name, and this line with one sentence describing what this app does for users._
+بوت تيليجرام بايثون يقدّم تذكيرات دينية (أذكار، ورد، قيام)، أوقات الصلاة حسب الولاية، وأسئلة/كويز يومية. الكود الأساسي في مجلد `telegram-bot/`.
 
-## Run & Operate
+## التشغيل والنشر
 
-- `pnpm --filter @workspace/api-server run dev` — run the API server (port 5000)
-- `pnpm run typecheck` — full typecheck across all packages
-- `pnpm run build` — typecheck + build all packages
-- `pnpm --filter @workspace/api-spec run codegen` — regenerate API hooks and Zod schemas from the OpenAPI spec
-- `pnpm --filter @workspace/db run push` — push DB schema changes (dev only)
-- Required env: `DATABASE_URL` — Postgres connection string
+- **الإنتاج (Production) يعمل على Railway**، وليس على Replit. النشر يتم عبر `Dockerfile` (في جذر المشروع) الذي ينسخ `telegram-bot/` وينفّذ `python3 bot.py`، وإعدادات Railway في `railway.json`.
+- **Replit هنا هو منصة تعديل الكود فقط** — لا يوجد workflow لتشغيل البوت على Replit عمداً، لتجنّب تعارض في استقبال تحديثات تيليجرام (Telegram لا يسمح بأكثر من عميل واحد يعمل بـ polling على نفس التوكن في نفس الوقت). لا تُشغّل `telegram-bot/bot.py` هنا إلا إذا أردت تعطيل البوت على Railway أولاً.
+- المتغيّر `TELEGRAM_BOT_TOKEN` محفوظ كـ **Secret** مشفّر على Replit (وليس كنص عادي)، ويجب ضبط نفس التوكن كمتغيّر بيئة على Railway بشكل منفصل.
 
-## Stack
+## البنية
 
-- pnpm workspaces, Node.js 24, TypeScript 5.9
-- API: Express 5
-- DB: PostgreSQL + Drizzle ORM
-- Validation: Zod (`zod/v4`), `drizzle-zod`
-- API codegen: Orval (from OpenAPI spec)
-- Build: esbuild (CJS bundle)
+- `telegram-bot/bot.py` — نقطة الدخول الرئيسية للبوت (handlers، polling)
+- `telegram-bot/content.py` — محتوى الأذكار/الأسئلة/الكويز
+- `telegram-bot/reminders.py` — نصوص التذكيرات (وِرد، أذكار، قيام، دعاء)
+- `telegram-bot/prayer_times.py` — حساب أوقات الصلاة حسب الولاية
+- `telegram-bot/broadcast_update.py` — سكريبت بث رسالة جماعية لمرة واحدة (يُشغَّل يدويًا)
+- `telegram-bot/*.json` — تخزين بسيط بملفات JSON (subscribers, users, wilayas)
 
-## Where things live
+## ملاحظة أمان
 
-_Populate as you build — short repo map plus pointers to the source-of-truth file for DB schema, API contracts, theme files, etc._
-
-## Architecture decisions
-
-_Populate as you build — non-obvious choices a reader couldn't infer from the code (3-5 bullets)._
-
-## Product
-
-_Describe the high-level user-facing capabilities of this app once they exist._
+كان `TELEGRAM_BOT_TOKEN` محفوظًا كنص عادي في ملف `.replit` (وهو موجود في تاريخ git)، فتم نقله إلى Secrets. **يُنصح بتجديد التوكن من BotFather** (`/revoke` أو `/token`) لأنه كان مكشوفًا في الكود، ثم تحديث القيمة الجديدة في Secrets هنا وفي متغيرات بيئة Railway.
 
 ## User preferences
 
-_Populate as you build — explicit user instructions worth remembering across sessions._
-
-## Gotchas
-
-_Populate as you build — sharp edges, "always run X before Y" rules._
-
-## Pointers
-
-- See the `pnpm-workspace` skill for workspace structure, TypeScript setup, and package details
+- Replit يُستخدم فقط لتعديل الكود — لا تُشغّل أو تنشر البوت من Replit؛ التشغيل الحي دائمًا على Railway.
