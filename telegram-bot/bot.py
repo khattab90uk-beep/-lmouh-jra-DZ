@@ -42,10 +42,41 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 # ─── مسارات الملفات ──────────────────────────────────────────────────────────
-SUBSCRIBERS_FILE   = Path(__file__).parent / "subscribers.json"
-ALL_USERS_FILE     = Path(__file__).parent / "all_users.json"
-USER_WILAYAS_FILE  = Path(__file__).parent / "user_wilayas.json"
-CONTENT_INDEX_FILE = Path(__file__).parent / "content_index.json"
+# على Railway نخزّن بيانات المستخدمين في الـ Volume الدائم (يُحدَّد عبر
+# RAILWAY_VOLUME_MOUNT_PATH تلقائياً، أو DATA_DIR يدوياً) بدل مجلد الكود، لأن
+# مجلد الكود يُعاد بناؤه من الصفر عند كل Deploy وتُفقد فيه أي تعديلات وقت التشغيل.
+# على Replit (للتحرير فقط) لا يوجد Volume فنستخدم مجلد المشروع كما كان.
+_DATA_DIR = os.environ.get("DATA_DIR") or os.environ.get("RAILWAY_VOLUME_MOUNT_PATH")
+DATA_DIR  = Path(_DATA_DIR) if _DATA_DIR else Path(__file__).parent
+DATA_DIR.mkdir(parents=True, exist_ok=True)
+
+CODE_DIR = Path(__file__).parent  # يحتوي النسخة "البذرة" المرفوعة على Git
+
+SUBSCRIBERS_FILE   = DATA_DIR / "subscribers.json"
+ALL_USERS_FILE     = DATA_DIR / "all_users.json"
+USER_WILAYAS_FILE  = DATA_DIR / "user_wilayas.json"
+CONTENT_INDEX_FILE = DATA_DIR / "content_index.json"
+
+
+def _migrate_seed_data_once():
+    """
+    أول تشغيل بعد ربط الـ Volume: الملفات في الـ Volume تكون فارغة،
+    بينما ملفات Git (subscribers.json...) قد تحوي بيانات قديمة.
+    ننسخها مرة واحدة فقط حتى لا تضيع بيانات المشتركين الحاليين.
+    """
+    if DATA_DIR == CODE_DIR:
+        return
+    for filename in ("subscribers.json", "all_users.json", "user_wilayas.json"):
+        target = DATA_DIR / filename
+        source = CODE_DIR / filename
+        if not target.exists() and source.exists():
+            try:
+                target.write_text(source.read_text(encoding="utf-8"), encoding="utf-8")
+                logger.info(f"📦 تم نقل بيانات {filename} من مجلد الكود إلى الـ Volume الدائم")
+            except Exception as e:
+                logger.warning(f"فشل نقل {filename} إلى الـ Volume: {e}")
+
+_migrate_seed_data_once()
 
 
 # ═══════════════════════════════════════════════════════════════════
