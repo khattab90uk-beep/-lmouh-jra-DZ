@@ -4,6 +4,7 @@
 
 import datetime
 from hijri_converter import Gregorian
+from content import HIJRI_EVENTS
 
 # ─── دعاء صاحبة البوت ─────────────────────────────────────────────
 OWNER_DUA = (
@@ -42,6 +43,33 @@ def get_hijri_date() -> str:
     day_name = WEEKDAYS_AR[today.weekday()]
     month_name = HIJRI_MONTHS_AR.get(h.month, "")
     return f"{day_name} {h.day} {month_name} {h.year} هـ"
+
+
+def get_hijri_history_text() -> str:
+    """
+    نص تنبيه يومي للمشتركين: التاريخ الهجري + أحداث بارزة وقعت في نفس
+    اليوم من التاريخ الإسلامي (إن وُجدت في content.HIJRI_EVENTS).
+    """
+    today = datetime.date.today()
+    h = Gregorian(today.year, today.month, today.day).to_hijri()
+    hijri_str = get_hijri_date()
+    events = HIJRI_EVENTS.get((h.month, h.day), [])
+
+    if events:
+        body = "\n\n".join(events)
+        events_block = f"📚 *من أحداث هذا اليوم في تاريخنا الإسلامي:*\n\n{body}"
+    else:
+        events_block = (
+            "📚 لا يوجد حدثٌ تاريخي مؤكّد مرتبط بهذا اليوم في مصادرنا،\n"
+            "لكن كل يوم فرصة جديدة للعمل الصالح 🌿"
+        )
+
+    return (
+        f"📅 *{hijri_str}*\n\n"
+        "━━━━━━━━━━━━━━━━━━━━━\n"
+        f"{events_block}\n"
+        "━━━━━━━━━━━━━━━━━━━━━"
+    )
 
 
 # ───────────────────────────────────────────────────────────────────

@@ -8,8 +8,6 @@ from telegram import (
     InlineKeyboardButton,
     InlineKeyboardMarkup,
     ReplyKeyboardMarkup,
-    KeyboardButton,
-    ReplyKeyboardRemove,
 )
 from telegram.ext import (
     Application,
@@ -20,7 +18,7 @@ from telegram.ext import (
     filters,
     ContextTypes,
 )
-from content import STRUCTURE, DAILY_QUESTIONS, QUIZ_QUESTIONS
+from content import STORIES, FAWAID, REFLECTIONS
 from reminders import (
     get_wife_dua,
     get_wird_reminder,
@@ -28,11 +26,9 @@ from reminders import (
     get_adhkar_masa_reminder,
     get_qiyam_reminder,
     get_hijri_date,
-    get_owner_dua,
-    OWNER_DUA,
+    get_hijri_history_text,
 )
 from prayer_times import (
-    compute_prayer_times,
     compute_prayer_times_for_wilaya,
     prayer_reminder_text,
     WILAYAS,
@@ -46,10 +42,10 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 # ─── مسارات الملفات ──────────────────────────────────────────────────────────
-SUBSCRIBERS_FILE    = Path(__file__).parent / "subscribers.json"
-QUESTION_INDEX_FILE = Path(__file__).parent / "question_index.json"
-ALL_USERS_FILE      = Path(__file__).parent / "all_users.json"
-USER_WILAYAS_FILE   = Path(__file__).parent / "user_wilayas.json"
+SUBSCRIBERS_FILE   = Path(__file__).parent / "subscribers.json"
+ALL_USERS_FILE     = Path(__file__).parent / "all_users.json"
+USER_WILAYAS_FILE  = Path(__file__).parent / "user_wilayas.json"
+CONTENT_INDEX_FILE = Path(__file__).parent / "content_index.json"
 
 
 # ═══════════════════════════════════════════════════════════════════
@@ -88,19 +84,6 @@ def save_subscribers(subs: set):
         json.dumps(list(subs), ensure_ascii=False, indent=2), encoding="utf-8"
     )
 
-def load_question_index() -> int:
-    if QUESTION_INDEX_FILE.exists():
-        try:
-            return json.loads(QUESTION_INDEX_FILE.read_text(encoding="utf-8")).get("index", 0)
-        except Exception:
-            return 0
-    return 0
-
-def save_question_index(idx: int):
-    QUESTION_INDEX_FILE.write_text(
-        json.dumps({"index": idx}, ensure_ascii=False), encoding="utf-8"
-    )
-
 # ─── ولايات المستخدمين ───────────────────────────────────────────
 def load_user_wilayas() -> dict:
     """يُعيد dict: {str(user_id): wilaya_key}"""
@@ -126,32 +109,55 @@ def set_user_wilaya(user_id: int, wilaya_key: str):
     save_user_wilayas(data)
 
 
+# ─── فهرس تدوير المحتوى (قصص / فوائد / خواطر) ───────────────────
+def _load_content_index() -> dict:
+    if CONTENT_INDEX_FILE.exists():
+        try:
+            return json.loads(CONTENT_INDEX_FILE.read_text(encoding="utf-8"))
+        except Exception:
+            return {}
+    return {}
+
+def _save_content_index(data: dict):
+    CONTENT_INDEX_FILE.write_text(
+        json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8"
+    )
+
+def next_content_item(key: str, items: list):
+    """يُعيد العنصر التالي من قائمة (دورياً) ويحفظ الفهرس الجديد."""
+    data = _load_content_index()
+    idx  = data.get(key, 0) % len(items)
+    data[key] = (idx + 1) % len(items)
+    _save_content_index(data)
+    return items[idx]
+
+
 # ═══════════════════════════════════════════════════════════════════
 # الإرسال الجماعي
 # ═══════════════════════════════════════════════════════════════════
 
-async def _broadcast_all(bot, text: str):
+async def _broadcast_all(bot, text: str, reply_markup=None):
     users = load_all_users()
     if not users:
         return
     failed = []
     for uid in list(users):
         try:
-            await bot.send_message(chat_id=uid, text=text, parse_mode="Markdown")
+            await bot.send_message(chat_id=uid, text=text, parse_mode="Markdown", reply_markup=reply_markup)
         except Exception as e:
             logger.warning(f"broadcast_all fail {uid}: {e}")
             failed.append(uid)
     if failed:
         save_all_users(users - set(failed))
 
-async def _broadcast_subscribers(bot, text: str):
+async def _broadcast_subscribers(bot, text: str, reply_markup=None):
     subs = load_subscribers()
     if not subs:
         return
     failed = []
     for uid in list(subs):
         try:
-            await bot.send_message(chat_id=uid, text=text, parse_mode="Markdown")
+            await bot.send_message(chat_id=uid, text=text, parse_mode="Markdown", reply_markup=reply_markup)
         except Exception as e:
             logger.warning(f"broadcast_sub fail {uid}: {e}")
             failed.append(uid)
@@ -163,33 +169,13 @@ async def _broadcast_subscribers(bot, text: str):
 # لوحات المفاتيح
 # ═══════════════════════════════════════════════════════════════════
 
-# ─── خريطة أزرار القائمة الرئيسية ───────────────────────────────
-# نص الزر → callback_data (يعالجه message_handler)
-REPLY_BUTTONS: dict[str, str] = {}
-
-def _build_reply_buttons():
-    for cat_key, cat_data in STRUCTURE.items():
-        REPLY_BUTTONS[cat_data["title"]] = f"CAT:{cat_key}"
-    REPLY_BUTTONS["📅 سؤال اليوم"]              = "DAILY_Q"
-    REPLY_BUTTONS["🗺️ اختر ولايتك"]             = "WILAYA_MENU"
-    REPLY_BUTTONS["🕌 مواقيت الصلاة"]           = "PRAYERS"
-    REPLY_BUTTONS["📊 إحصائيات"]                = "STATS"
-    REPLY_BUTTONS["🔔 اشترك"]                   = "SUBSCRIBE"
-    REPLY_BUTTONS["🔕 إلغاء الاشتراك"]          = "UNSUBSCRIBE"
-
-
 def main_reply_keyboard() -> ReplyKeyboardMarkup:
-    """القائمة الرئيسية الدائمة أسفل الشاشة — تظهر/تختفي بزر المربع."""
-    cats = list(STRUCTURE.values())
-    rows = []
-    for i in range(0, len(cats), 2):
-        row = [cats[i]["title"]]
-        if i + 1 < len(cats):
-            row.append(cats[i + 1]["title"])
-        rows.append(row)
-    rows.append(["📅 سؤال اليوم",     "🗺️ اختر ولايتك"])
-    rows.append(["🕌 مواقيت الصلاة",  "📊 إحصائيات"])
-    rows.append(["🔔 اشترك",          "🔕 إلغاء الاشتراك"])
+    """القائمة الرئيسية الدائمة أسفل الشاشة — مواقيت الصلاة قسم ثابت."""
+    rows = [
+        ["🕌 مواقيت الصلاة",  "🗺️ اختر ولايتك"],
+        ["📊 إحصائيات",       "🔔 اشترك"],
+        ["🔕 إلغاء الاشتراك"],
+    ]
     return ReplyKeyboardMarkup(
         rows,
         resize_keyboard=True,
@@ -197,14 +183,23 @@ def main_reply_keyboard() -> ReplyKeyboardMarkup:
         is_persistent=False,
     )
 
+# خريطة نص الزر → معرّف الإجراء (يعالجها message_handler)
+REPLY_BUTTONS: dict[str, str] = {
+    "🕌 مواقيت الصلاة":  "PRAYERS",
+    "🗺️ اختر ولايتك":   "WILAYA_MENU",
+    "📊 إحصائيات":       "STATS",
+    "🔔 اشترك":          "SUBSCRIBE",
+    "🔕 إلغاء الاشتراك": "UNSUBSCRIBE",
+}
+
 
 def wilaya_menu_keyboard() -> InlineKeyboardMarkup:
     """لوحة بجميع الولايات — عمودان."""
-    keys   = list(WILAYAS.keys())
-    rows   = []
+    keys = list(WILAYAS.keys())
+    rows = []
     for i in range(0, len(keys), 2):
         row = []
-        for k in keys[i:i+2]:
+        for k in keys[i:i + 2]:
             row.append(InlineKeyboardButton(
                 WILAYAS[k]["name"], callback_data=f"SET_WILAYA:{k}"
             ))
@@ -213,44 +208,10 @@ def wilaya_menu_keyboard() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(rows)
 
 
-def topics_keyboard(cat_key: str) -> InlineKeyboardMarkup:
-    cat = STRUCTURE[cat_key]
-    rows = []
-    for topic_key, topic_data in cat["topics"].items():
-        rows.append([
-            InlineKeyboardButton(topic_data["title"], callback_data=f"TOPIC:{cat_key}:{topic_key}")
-        ])
-    rows.append([InlineKeyboardButton("🏠 الرئيسية", callback_data="MAIN")])
-    return InlineKeyboardMarkup(rows)
-
-def subtopics_keyboard(cat_key: str, topic_key: str) -> InlineKeyboardMarkup:
-    topic = STRUCTURE[cat_key]["topics"][topic_key]
-    rows  = []
-    for sub_key, sub_data in topic["subtopics"].items():
-        rows.append([
-            InlineKeyboardButton(sub_data["title"], callback_data=f"SUB:{cat_key}:{topic_key}:{sub_key}")
-        ])
-    rows.append([
-        InlineKeyboardButton("🔙 رجوع", callback_data=f"CAT:{cat_key}"),
-        InlineKeyboardButton("🏠 الرئيسية", callback_data="MAIN"),
-    ])
-    return InlineKeyboardMarkup(rows)
-
-def back_to_topic_keyboard(cat_key: str, topic_key: str) -> InlineKeyboardMarkup:
+def dismiss_keyboard() -> InlineKeyboardMarkup:
+    """زر يظهر أسفل تذكيرات الأذكار — يحذف الرسالة بعد قراءتها لتفادي التراكم."""
     return InlineKeyboardMarkup([
-        [InlineKeyboardButton("🔙 رجوع للأقسام الفرعية", callback_data=f"TOPIC:{cat_key}:{topic_key}")],
-        [
-            InlineKeyboardButton("📂 القسم", callback_data=f"CAT:{cat_key}"),
-            InlineKeyboardButton("🏠 الرئيسية", callback_data="MAIN"),
-        ],
-    ])
-
-def quiz_keyboard(idx: int) -> InlineKeyboardMarkup:
-    q = QUIZ_QUESTIONS[idx % len(QUIZ_QUESTIONS)]
-    return InlineKeyboardMarkup([
-        [InlineKeyboardButton(q["choices"][0], callback_data=f"QUIZ_ANS:{idx}:0")],
-        [InlineKeyboardButton(q["choices"][1], callback_data=f"QUIZ_ANS:{idx}:1")],
-        [InlineKeyboardButton("💡 مساعدة — اعطني تلميح", callback_data=f"QUIZ_HINT:{idx}")],
+        [InlineKeyboardButton("✅ قرأتها — إخفاء الرسالة", callback_data="DISMISS")]
     ])
 
 
@@ -292,16 +253,13 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     welcome = (
         f"السلام عليكم ورحمة الله وبركاته 🌿\n\n"
         f"📅 *{hijri}*\n\n"
-        f"مرحباً يا *{name}* في بوت *العلم الشرعي للموحدين* 📚\n\n"
-        "• 📗 العقيدة والتوحيد\n"
-        "• 📘 الفقه والعبادات\n"
-        "• 🌸 أحكام المرأة المسلمة\n"
-        "• 🔵 أحكام الرجل المسلم\n"
-        "• 💎 التزكية والأخلاق\n"
-        "• 📿 الأذكار والأدعية\n"
-        "• 📖 القرآن الكريم\n"
-        "• 📜 الحديث والسيرة\n"
-        "• 🌟 قصص الصحابة والصحابيات\n\n"
+        f"مرحباً يا *{name}* 📚\n\n"
+        "🕌 *مواقيت الصلاة* — قسمٌ ثابت في البوت، بحسب ولايتك.\n\n"
+        "وكمشترك، تصلك أيضاً:\n"
+        "• 📅 التاريخ الهجري وأحداث بارزة وقعت في نفس اليوم\n"
+        "• 🌟 قصص صالحين من بلاد المغرب الإسلامي وجزيرة العرب، كل نصف ساعة\n"
+        "• 💎 فوائد إيمانية متنوعة، كل نصف ساعة\n"
+        "• 🤍 خواطر وتدبرات، بعد كل قصة بخمس دقائق\n\n"
         f"🕌 *مواقيت اليوم — {w['name']}:*\n"
         f"فجر {times['fajr'].strftime('%H:%M')} | ظهر {times['dhuhr'].strftime('%H:%M')} | "
         f"عصر {times['asr'].strftime('%H:%M')} | مغرب {times['maghrib'].strftime('%H:%M')} | "
@@ -324,20 +282,20 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "/wilaya — اختر ولايتك\n"
         "/wird — الورد القرآني اليومي\n"
         "/dua — دعاء زوجة المجاهد\n"
-        "/daily — سؤال اليوم\n"
         "/stats — الإحصائيات\n"
-        "/search <كلمة> — البحث\n"
-        "/subscribe — الاشتراك في الأسئلة اليومية\n"
+        "/subscribe — الاشتراك في المحتوى اليومي والمتجدد\n"
         "/unsubscribe — إلغاء الاشتراك\n\n"
-        "📲 *التذكيرات الإلزامية:*\n"
+        "📲 *التذكيرات الإلزامية (لكل المستخدمين):*\n"
         "🌅 06:00 — الورد القرآني\n"
-        "🤲 06:30 — أذكار الصباح\n"
-        "🌆 17:30 — أذكار المساء\n"
+        "🤲 06:30 — أذكار الصباح (مع زر لإخفائها بعد القراءة)\n"
+        "🌆 17:30 — أذكار المساء (مع زر لإخفائها بعد القراءة)\n"
         "🌙 02:25 — قيام الليل\n"
-        "🕌 قبل كل صلاة بـ10 دق — تنبيه بتوقيت ولايتك\n\n"
+        "🕌 قبل كل صلاة بـ10 دقائق — تنبيه بتوقيت ولايتك\n\n"
         "📩 *للمشتركين فقط:*\n"
-        "🧠 08:00 — اختبار تفاعلي\n"
-        "❓ 10:00 — سؤال شرعي\n"
+        "📅 08:00 — التاريخ الهجري وأحداث هذا اليوم في التاريخ الإسلامي\n"
+        "🌟 كل نصف ساعة — قصة من قصص الصالحين\n"
+        "💎 كل نصف ساعة — فائدة إيمانية\n"
+        "🤍 بعد كل قصة بخمس دقائق — خاطرة وتدبر\n"
         "🌙 21:00 — دعاء زوجة المجاهد"
     )
     await update.message.reply_text(text, parse_mode="Markdown")
@@ -373,15 +331,17 @@ async def subscribe_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     register_user(user_id)
     subs = load_subscribers()
     if user_id in subs:
-        await update.message.reply_text("✅ أنت مشترك بالفعل في الأسئلة اليومية!")
+        await update.message.reply_text("✅ أنت مشترك بالفعل في المحتوى اليومي والمتجدد!")
         return
     subs.add(user_id)
     save_subscribers(subs)
     await update.message.reply_text(
         "🔔 *تم الاشتراك!*\n\n"
         "ستصلك إضافةً للتذكيرات الإلزامية:\n"
-        "🧠 اختبار تفاعلي — 08:00 صباحاً\n"
-        "❓ سؤال شرعي — 10:00 صباحاً\n"
+        "📅 التاريخ الهجري وأحداث هذا اليوم — 08:00 صباحاً\n"
+        "🌟 قصص صالحين من المغرب الإسلامي وجزيرة العرب — كل نصف ساعة\n"
+        "💎 فوائد إيمانية — كل نصف ساعة\n"
+        "🤍 خواطر وتدبرات — بعد كل قصة بخمس دقائق\n"
         "🌙 دعاء زوجة المجاهد — 9:00 مساءً\n\n"
         "لإلغاء الاشتراك: /unsubscribe",
         parse_mode="Markdown"
@@ -398,17 +358,7 @@ async def unsubscribe_command(update: Update, context: ContextTypes.DEFAULT_TYPE
         return
     subs.discard(user_id)
     save_subscribers(subs)
-    await update.message.reply_text("🔕 تم إلغاء اشتراكك في الأسئلة اليومية.")
-
-async def daily_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    register_user(update.effective_user.id)
-    idx = load_question_index()
-    q   = DAILY_QUESTIONS[idx % len(DAILY_QUESTIONS)]
-    await update.message.reply_text(
-        f"📅 *سؤال اليوم*\n\n❓ *{q['q']}*\n\n{q['a']}\n\n"
-        "─────────────────\n/subscribe للأسئلة اليومية",
-        parse_mode="Markdown"
-    )
+    await update.message.reply_text("🔕 تم إلغاء اشتراكك في المحتوى اليومي والمتجدد.")
 
 async def wird_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     register_user(update.effective_user.id)
@@ -421,51 +371,18 @@ async def dua_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def stats_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     register_user(update.effective_user.id)
-    all_users   = load_all_users()
-    subs        = load_subscribers()
-    user_wils   = load_user_wilayas()
-    total_subs  = sum(
-        len(t["subtopics"])
-        for cat in STRUCTURE.values()
-        for t in cat["topics"].values()
-    )
+    all_users = load_all_users()
+    subs      = load_subscribers()
+    user_wils = load_user_wilayas()
     await update.message.reply_text(
         "📊 *إحصائيات البوت*\n\n"
         f"👤 إجمالي المستخدمين: *{len(all_users)}*\n"
-        f"🔔 المشتركون في الأسئلة: *{len(subs)}*\n"
+        f"🔔 المشتركون في المحتوى المتجدد: *{len(subs)}*\n"
         f"🗺️ اختاروا ولاياتهم: *{len(user_wils)}*\n"
-        f"📚 الأقسام الرئيسية: *{len(STRUCTURE)}*\n"
-        f"📋 الأقسام الفرعية: *{total_subs}*\n"
-        f"🧠 أسئلة الاختبار: *{len(QUIZ_QUESTIONS)}*\n"
+        f"🌟 قصص الصالحين المتاحة: *{len(STORIES)}*\n"
+        f"💎 الفوائد الإيمانية المتاحة: *{len(FAWAID)}*\n"
         f"📅 {get_hijri_date()}\n",
         parse_mode="Markdown"
-    )
-
-async def search_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    register_user(update.effective_user.id)
-    query = " ".join(context.args).strip() if context.args else ""
-    if not query:
-        await update.message.reply_text(
-            "أرسل الكلمة بعد الأمر مثل:\n`/search الحيض`", parse_mode="Markdown"
-        )
-        return
-    await _do_search(update, query)
-
-async def _do_search(update: Update, query: str):
-    results = []
-    for cat_key, cat in STRUCTURE.items():
-        for topic_key, topic in cat["topics"].items():
-            for sub_key, sub in topic["subtopics"].items():
-                if query in sub["title"] or query in sub["text"]:
-                    results.append((sub["title"], f"SUB:{cat_key}:{topic_key}:{sub_key}"))
-    if not results:
-        await update.message.reply_text(f"لم أجد نتائج لـ «{query}»، جرّب كلمة أخرى 🔍")
-        return
-    keyboard = [[InlineKeyboardButton(t, callback_data=d)] for t, d in results[:10]]
-    keyboard.append([InlineKeyboardButton("🏠 الرئيسية", callback_data="MAIN")])
-    await update.message.reply_text(
-        f"🔍 نتائج «{query}» ({len(results)} نتيجة):",
-        reply_markup=InlineKeyboardMarkup(keyboard)
     )
 
 
@@ -479,6 +396,14 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     data  = query.data
     uid   = query.from_user.id
     register_user(uid)
+
+    # ── إخفاء تذكير الأذكار بعد قراءته ──────────────────────────────
+    if data == "DISMISS":
+        try:
+            await query.message.delete()
+        except Exception as e:
+            logger.warning(f"dismiss delete fail {uid}: {e}")
+        return
 
     # ── الرئيسية ──────────────────────────────────────────────────
     if data == "MAIN":
@@ -526,20 +451,6 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             ])
         )
 
-    # ── السؤال اليومي ─────────────────────────────────────────────
-    elif data == "DAILY_Q":
-        idx = load_question_index()
-        q   = DAILY_QUESTIONS[idx % len(DAILY_QUESTIONS)]
-        await query.edit_message_text(
-            f"📅 *سؤال اليوم*\n\n❓ *{q['q']}*\n\n{q['a']}\n\n"
-            "─────────────────\nاشترك في الأسئلة اليومية 👇",
-            parse_mode="Markdown",
-            reply_markup=InlineKeyboardMarkup([
-                [InlineKeyboardButton("🔔 اشترك في الأسئلة اليومية", callback_data="SUBSCRIBE")],
-                [InlineKeyboardButton("🏠 الرئيسية", callback_data="MAIN")],
-            ])
-        )
-
     # ── اشتراك / إلغاء ────────────────────────────────────────────
     elif data == "SUBSCRIBE":
         subs = load_subscribers()
@@ -548,7 +459,7 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         else:
             subs.add(uid)
             save_subscribers(subs)
-            await query.answer("🔔 تم الاشتراك! ستصلك أسئلة وأخبار يومياً", show_alert=True)
+            await query.answer("🔔 تم الاشتراك! ستصلك قصص وفوائد وتنبيهات يومياً", show_alert=True)
 
     elif data == "UNSUBSCRIBE":
         subs = load_subscribers()
@@ -559,176 +470,89 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             save_subscribers(subs)
             await query.answer("🔕 تم إلغاء اشتراكك.", show_alert=True)
 
-    # ── اختبار تفاعلي ─────────────────────────────────────────────
-    elif data.startswith("QUIZ_ANS:"):
-        parts  = data.split(":")
-        idx    = int(parts[1])
-        choice = int(parts[2])
-        q      = QUIZ_QUESTIONS[idx % len(QUIZ_QUESTIONS)]
-        result = q["explanation"] if choice == q["correct"] else q["wrong"]
-        await query.edit_message_text(
-            f"📅 {get_hijri_date()}\n\n{result}",
-            parse_mode="Markdown",
-            reply_markup=InlineKeyboardMarkup([
-                [InlineKeyboardButton("🏠 الرئيسية", callback_data="MAIN")]
-            ])
-        )
-
-    elif data.startswith("QUIZ_HINT:"):
-        idx = int(data.split(":")[1])
-        q   = QUIZ_QUESTIONS[idx % len(QUIZ_QUESTIONS)]
-        await query.answer(q["hint"], show_alert=True)
-
-    # ── تصفح المحتوى ──────────────────────────────────────────────
-    elif data.startswith("CAT:"):
-        cat_key = data[4:]
-        if cat_key not in STRUCTURE:
-            return
-        cat = STRUCTURE[cat_key]
-        await query.edit_message_text(
-            f"*{cat['title']}*\n\nاختر الموضوع:",
-            parse_mode="Markdown", reply_markup=topics_keyboard(cat_key)
-        )
-
-    elif data.startswith("TOPIC:"):
-        parts = data.split(":", 2)
-        if len(parts) < 3:
-            return
-        cat_key, topic_key = parts[1], parts[2]
-        if cat_key not in STRUCTURE or topic_key not in STRUCTURE[cat_key]["topics"]:
-            return
-        topic = STRUCTURE[cat_key]["topics"][topic_key]
-        await query.edit_message_text(
-            f"📂 *{topic['title']}*\n\nاختر القسم الفرعي:",
-            parse_mode="Markdown", reply_markup=subtopics_keyboard(cat_key, topic_key)
-        )
-
-    elif data.startswith("SUB:"):
-        parts = data.split(":", 3)
-        if len(parts) < 4:
-            return
-        cat_key, topic_key, sub_key = parts[1], parts[2], parts[3]
-        try:
-            sub = STRUCTURE[cat_key]["topics"][topic_key]["subtopics"][sub_key]
-        except KeyError:
-            return
-        await query.edit_message_text(
-            sub["text"], parse_mode="Markdown",
-            reply_markup=back_to_topic_keyboard(cat_key, topic_key)
-        )
-
 
 async def message_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     uid  = update.effective_user.id
     register_user(uid)
     text = (update.message.text or "").strip()
 
-    # ── زر من القائمة الرئيسية ReplyKeyboard ──────────────────────
     action = REPLY_BUTTONS.get(text)
-    if action:
-        if action.startswith("CAT:"):
-            cat_key = action[4:]
-            if cat_key in STRUCTURE:
-                cat = STRUCTURE[cat_key]
-                await update.message.reply_text(
-                    f"*{cat['title']}*\n\nاختر الموضوع:",
-                    parse_mode="Markdown",
-                    reply_markup=topics_keyboard(cat_key),
-                )
-            return
 
-        if action == "DAILY_Q":
-            idx = load_question_index()
-            q   = DAILY_QUESTIONS[idx % len(DAILY_QUESTIONS)]
-            await update.message.reply_text(
-                f"📅 *سؤال اليوم*\n\n❓ *{q['q']}*\n\n{q['a']}\n\n"
-                "─────────────────\nاشترك لتصلك الأسئلة يومياً 🔔",
-                parse_mode="Markdown",
-            )
-            return
-
-        if action == "WILAYA_MENU":
-            wkey = get_user_wilaya(uid)
-            w    = WILAYAS[wkey]
-            await update.message.reply_text(
-                f"🗺️ *اختر ولايتك*\n\n"
-                f"ولايتك الحالية: *{w['name']}*\n\n"
-                "اضغط على اسم ولايتك لتفعيل تنبيهات الصلاة 👇",
-                parse_mode="Markdown",
-                reply_markup=wilaya_menu_keyboard(),
-            )
-            return
-
-        if action == "PRAYERS":
-            wkey  = get_user_wilaya(uid)
-            hijri = get_hijri_date()
-            text_ = _format_wilaya_times(wkey, datetime.date.today(), hijri)
-            await update.message.reply_text(
-                text_, parse_mode="Markdown",
-                reply_markup=InlineKeyboardMarkup([
-                    [InlineKeyboardButton("🗺️ غيّر ولايتك", callback_data="WILAYA_MENU")]
-                ]),
-            )
-            return
-
-        if action == "STATS":
-            all_users  = load_all_users()
-            subs       = load_subscribers()
-            user_wils  = load_user_wilayas()
-            total_subs = sum(
-                len(t["subtopics"])
-                for cat in STRUCTURE.values()
-                for t in cat["topics"].values()
-            )
-            await update.message.reply_text(
-                "📊 *إحصائيات البوت*\n\n"
-                f"👤 إجمالي المستخدمين: *{len(all_users)}*\n"
-                f"🔔 المشتركون في الأسئلة: *{len(subs)}*\n"
-                f"🗺️ اختاروا ولاياتهم: *{len(user_wils)}*\n"
-                f"📚 الأقسام الرئيسية: *{len(STRUCTURE)}*\n"
-                f"📋 الأقسام الفرعية: *{total_subs}*\n"
-                f"🧠 أسئلة الاختبار: *{len(QUIZ_QUESTIONS)}*\n"
-                f"📅 {get_hijri_date()}",
-                parse_mode="Markdown",
-            )
-            return
-
-        if action == "SUBSCRIBE":
-            subs = load_subscribers()
-            if uid in subs:
-                await update.message.reply_text("✅ أنت مشترك بالفعل في الأسئلة اليومية!")
-            else:
-                subs.add(uid)
-                save_subscribers(subs)
-                await update.message.reply_text(
-                    "🔔 *تم الاشتراك!*\n\n"
-                    "ستصلك إضافةً للتذكيرات الإلزامية:\n"
-                    "🧠 اختبار تفاعلي — 08:00 صباحاً\n"
-                    "❓ سؤال شرعي — 10:00 صباحاً\n"
-                    "🌙 دعاء زوجة المجاهد — 9:00 مساءً\n\n"
-                    "لإلغاء الاشتراك اضغط: 🔕 إلغاء الاشتراك",
-                    parse_mode="Markdown",
-                )
-            return
-
-        if action == "UNSUBSCRIBE":
-            subs = load_subscribers()
-            if uid not in subs:
-                await update.message.reply_text(
-                    "أنت لست مشتركاً.\n"
-                    "⚠️ التذكيرات الإلزامية والصلوات تصلك دائماً."
-                )
-            else:
-                subs.discard(uid)
-                save_subscribers(subs)
-                await update.message.reply_text("🔕 تم إلغاء اشتراكك في الأسئلة اليومية.")
-            return
-
-    # ── بحث نصي حر ────────────────────────────────────────────────
-    if len(text) < 2:
-        await update.message.reply_text("اكتب كلمة للبحث أو استخدم الأزرار أسفل الشاشة 🌿")
+    if action == "PRAYERS":
+        wkey  = get_user_wilaya(uid)
+        hijri = get_hijri_date()
+        text_ = _format_wilaya_times(wkey, datetime.date.today(), hijri)
+        await update.message.reply_text(
+            text_, parse_mode="Markdown",
+            reply_markup=InlineKeyboardMarkup([
+                [InlineKeyboardButton("🗺️ غيّر ولايتك", callback_data="WILAYA_MENU")]
+            ]),
+        )
         return
-    await _do_search(update, text)
+
+    if action == "WILAYA_MENU":
+        wkey = get_user_wilaya(uid)
+        w    = WILAYAS[wkey]
+        await update.message.reply_text(
+            f"🗺️ *اختر ولايتك*\n\n"
+            f"ولايتك الحالية: *{w['name']}*\n\n"
+            "اضغط على اسم ولايتك لتفعيل تنبيهات الصلاة 👇",
+            parse_mode="Markdown",
+            reply_markup=wilaya_menu_keyboard(),
+        )
+        return
+
+    if action == "STATS":
+        all_users = load_all_users()
+        subs      = load_subscribers()
+        user_wils = load_user_wilayas()
+        await update.message.reply_text(
+            "📊 *إحصائيات البوت*\n\n"
+            f"👤 إجمالي المستخدمين: *{len(all_users)}*\n"
+            f"🔔 المشتركون في المحتوى المتجدد: *{len(subs)}*\n"
+            f"🗺️ اختاروا ولاياتهم: *{len(user_wils)}*\n"
+            f"🌟 قصص الصالحين المتاحة: *{len(STORIES)}*\n"
+            f"💎 الفوائد الإيمانية المتاحة: *{len(FAWAID)}*\n"
+            f"📅 {get_hijri_date()}",
+            parse_mode="Markdown",
+        )
+        return
+
+    if action == "SUBSCRIBE":
+        subs = load_subscribers()
+        if uid in subs:
+            await update.message.reply_text("✅ أنت مشترك بالفعل في المحتوى المتجدد!")
+        else:
+            subs.add(uid)
+            save_subscribers(subs)
+            await update.message.reply_text(
+                "🔔 *تم الاشتراك!*\n\n"
+                "ستصلك إضافةً للتذكيرات الإلزامية:\n"
+                "📅 التاريخ الهجري وأحداث هذا اليوم — 08:00 صباحاً\n"
+                "🌟 قصص صالحين — كل نصف ساعة\n"
+                "💎 فوائد إيمانية — كل نصف ساعة\n"
+                "🤍 خواطر وتدبرات — بعد كل قصة بخمس دقائق\n"
+                "🌙 دعاء زوجة المجاهد — 9:00 مساءً\n\n"
+                "لإلغاء الاشتراك اضغط: 🔕 إلغاء الاشتراك",
+                parse_mode="Markdown",
+            )
+        return
+
+    if action == "UNSUBSCRIBE":
+        subs = load_subscribers()
+        if uid not in subs:
+            await update.message.reply_text(
+                "أنت لست مشتركاً.\n"
+                "⚠️ التذكيرات الإلزامية والصلوات تصلك دائماً."
+            )
+        else:
+            subs.discard(uid)
+            save_subscribers(subs)
+            await update.message.reply_text("🔕 تم إلغاء اشتراكك في المحتوى المتجدد.")
+        return
+
+    # ── أي نص آخر ─────────────────────────────────────────────────
+    await update.message.reply_text("استخدم الأزرار أسفل الشاشة للتنقل 👇🌿")
 
 
 # ═══════════════════════════════════════════════════════════════════
@@ -740,55 +564,32 @@ async def job_wird(context: ContextTypes.DEFAULT_TYPE):
     await _broadcast_all(context.bot, get_wird_reminder(day))
 
 async def job_adhkar_sabah(context: ContextTypes.DEFAULT_TYPE):
-    await _broadcast_all(context.bot, get_adhkar_sabah_reminder())
+    await _broadcast_all(context.bot, get_adhkar_sabah_reminder(), reply_markup=dismiss_keyboard())
 
 async def job_adhkar_masa(context: ContextTypes.DEFAULT_TYPE):
-    await _broadcast_all(context.bot, get_adhkar_masa_reminder())
+    await _broadcast_all(context.bot, get_adhkar_masa_reminder(), reply_markup=dismiss_keyboard())
 
 async def job_qiyam(context: ContextTypes.DEFAULT_TYPE):
     await _broadcast_all(context.bot, get_qiyam_reminder())
 
-async def job_daily_question(context: ContextTypes.DEFAULT_TYPE):
-    idx   = load_question_index()
-    q     = DAILY_QUESTIONS[idx % len(DAILY_QUESTIONS)]
-    save_question_index(idx + 1)
-    today = datetime.date.today().strftime("%A %d/%m/%Y")
-    text  = (
-        f"🌅 *السؤال اليومي — {today}*\n"
-        f"📅 {get_hijri_date()}\n\n"
-        f"❓ *{q['q']}*\n\n{q['a']}\n\n"
-        "─────────────────\n📚 /start للمزيد"
-    )
-    await _broadcast_subscribers(context.bot, text)
+async def job_hijri_history(context: ContextTypes.DEFAULT_TYPE):
+    await _broadcast_subscribers(context.bot, get_hijri_history_text())
 
 async def job_wife_dua(context: ContextTypes.DEFAULT_TYPE):
     await _broadcast_subscribers(context.bot, get_wife_dua())
 
-async def job_daily_quiz(context: ContextTypes.DEFAULT_TYPE):
-    idx   = load_question_index() % len(QUIZ_QUESTIONS)
-    q     = QUIZ_QUESTIONS[idx]
-    hijri = get_hijri_date()
-    text  = (
-        f"🧠 *اختبار اليوم*\n"
-        f"📅 {hijri}\n"
-        "━━━━━━━━━━━━━━━━━━━━━\n\n"
-        f"{q['q']}\n\n"
-        "_اختر الجواب الصحيح 👇_"
-    )
-    subs   = load_subscribers()
-    failed = []
-    for uid in list(subs):
-        try:
-            await context.bot.send_message(
-                chat_id=uid, text=text,
-                parse_mode="Markdown",
-                reply_markup=quiz_keyboard(idx),
-            )
-        except Exception as e:
-            logger.warning(f"quiz fail {uid}: {e}")
-            failed.append(uid)
-    if failed:
-        save_subscribers(subs - set(failed))
+async def job_story(context: ContextTypes.DEFAULT_TYPE):
+    story = next_content_item("stories", STORIES)
+    text  = f"{story['title']}\n\n{story['text']}"
+    await _broadcast_subscribers(context.bot, text)
+
+async def job_fawaid(context: ContextTypes.DEFAULT_TYPE):
+    fawaid_text = next_content_item("fawaid", FAWAID)
+    await _broadcast_subscribers(context.bot, fawaid_text)
+
+async def job_reflection(context: ContextTypes.DEFAULT_TYPE):
+    reflection = next_content_item("reflections", REFLECTIONS)
+    await _broadcast_subscribers(context.bot, reflection)
 
 
 # ─── تنبيه صلاة واحدة — يُستدعى من run_once ─────────────────────
@@ -881,9 +682,6 @@ def main():
     if not token:
         raise ValueError("TELEGRAM_BOT_TOKEN غير موجود في متغيرات البيئة!")
 
-    # بناء خريطة أزرار ReplyKeyboard من STRUCTURE (بعد استيراده)
-    _build_reply_buttons()
-
     app = Application.builder().token(token).build()
 
     app.add_handler(CommandHandler("start",       start))
@@ -892,11 +690,9 @@ def main():
     app.add_handler(CommandHandler("wilaya",      wilaya_command))
     app.add_handler(CommandHandler("subscribe",   subscribe_command))
     app.add_handler(CommandHandler("unsubscribe", unsubscribe_command))
-    app.add_handler(CommandHandler("daily",       daily_command))
     app.add_handler(CommandHandler("wird",        wird_command))
     app.add_handler(CommandHandler("dua",         dua_command))
     app.add_handler(CommandHandler("stats",       stats_command))
-    app.add_handler(CommandHandler("search",      search_command))
     app.add_handler(CallbackQueryHandler(button_handler))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, message_handler))
 
@@ -910,14 +706,19 @@ def main():
     jq.run_daily(job_schedule_prayers, datetime.time(0,  5),  name="schedule_prayers")
 
     # ══ للمشتركين فقط ══
-    jq.run_daily(job_daily_quiz,     datetime.time(7,  0),  name="daily_quiz")
-    jq.run_daily(job_daily_question, datetime.time(9,  0),  name="daily_question")
-    jq.run_daily(job_wife_dua,       datetime.time(20, 0),  name="wife_dua")
+    jq.run_daily(job_hijri_history, datetime.time(7, 0),  name="hijri_history")
+    jq.run_daily(job_wife_dua,      datetime.time(20, 0), name="wife_dua")
+
+    # محتوى متجدد كل نصف ساعة — قصص الصالحين، ثم بعدها بـ15 دقيقة فائدة
+    # إيمانية، ثم خاطرة/تدبر بعد كل قصة بخمس دقائق (يتكرر لاحقاً كل نصف ساعة)
+    jq.run_repeating(job_story,      interval=1800, first=0,   name="story")
+    jq.run_repeating(job_reflection, interval=1800, first=300, name="reflection")
+    jq.run_repeating(job_fawaid,     interval=1800, first=900, name="fawaid")
 
     # ── جدول صلوات اليوم فور الإقلاع
     jq.run_once(job_schedule_prayers, when=10, name="schedule_prayers_startup")
 
-    logger.info("✅ البوت يعمل — 31 ولاية + 9 وظائف يومية")
+    logger.info("✅ البوت يعمل — 31 ولاية + مواقيت الصلاة + محتوى متجدد للمشتركين")
 
     # ── Railway → webhook | أي بيئة ثانية → polling ────────────────
     railway_domain = os.environ.get("RAILWAY_PUBLIC_DOMAIN", "").strip()
